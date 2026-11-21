@@ -23,6 +23,8 @@ import {
 import { useDocumentHistory } from './useDocumentHistory'
 import { useRenderQueue } from './useRenderQueue'
 import { usePersistenceSync } from './usePersistenceSync'
+import { useWatchedProjectFile } from './useWatchedProjectFile'
+import { useLayoutTelemetry } from './useLayoutTelemetry'
 import { usePageActions } from './usePageActions'
 import { useDiagramActions } from './useDiagramActions'
 import { useClipboard } from './useClipboard'
@@ -36,9 +38,7 @@ function getInitialDocumentState(): UndoableDocumentState {
   return {
     pages,
     activePageId: pages[0]!.id,
-    mode: (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
-      ? 'dark'
-      : 'light',
+    mode: 'light',
     editorLigatures: false,
     autoFormat: true,
   }
@@ -202,12 +202,14 @@ export function useAppController(isMobile: boolean): AppController {
 
   // ── Side effects: persistence sync + render queue ───────────────────────────
   usePersistenceSync({ state, dispatch })
+  useWatchedProjectFile(dispatch)
   useRenderQueue({
     pages: state.pages,
     activePageId: state.activePageId,
     activeDiagramId: activeDiagram?.id ?? null,
     dispatch,
   })
+  useLayoutTelemetry(state.pages, state.activePageId)
 
   return {
     state,

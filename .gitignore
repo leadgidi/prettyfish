@@ -42,3 +42,4 @@ trace-*.json
 perf-artifacts/
 .env
 tests/e2e/mobile/screenshots/
+.local-run/

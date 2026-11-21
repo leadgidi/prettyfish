@@ -5,6 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import istanbul from 'vite-plugin-istanbul'
 import { cloudflare } from '@cloudflare/vite-plugin'
+import { watchProjectFilePlugin } from './vite-plugin-watch-project'
 
 const isVitest = process.env.VITEST === 'true'
 const isPlaywright = process.env.PLAYWRIGHT === 'true'
@@ -15,6 +16,7 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    watchProjectFilePlugin(),
     !isVitest && !isPlaywright && !isLocalAppOnly ? cloudflare() : null,
     process.env.PLAYWRIGHT_COVERAGE
       ? istanbul({
