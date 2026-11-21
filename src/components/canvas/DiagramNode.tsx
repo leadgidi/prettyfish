@@ -7,6 +7,7 @@
 import { memo, useCallback, useEffect, useRef } from 'react'
 import { NodeResizeControl, type Node } from '@xyflow/react'
 import type { NodeProps } from '@xyflow/react'
+import { MIN_CARD_HEIGHT, previewMinHeight } from '@/lib/cardLayout'
 import type { Diagram } from '@/types'
 
 // ── Data passed via React Flow node.data ─────────────────────────────────────
@@ -116,11 +117,7 @@ export const DiagramNode = memo(function DiagramNode({
   const isHighlighted = isActive || selected
   const svgWidth = diagram.render?.svgWidth ?? null
   const svgHeight = diagram.render?.svgHeight ?? null
-  const previewAvailableWidth = Math.max(0, diagram.width - 32)
-  const renderedPreviewHeight = svgWidth && svgHeight
-    ? Math.ceil(svgHeight * Math.min(1, previewAvailableWidth / svgWidth))
-    : null
-  const previewMinHeight = Math.max(240, (renderedPreviewHeight ?? 0) + 8)
+  const previewHeight = previewMinHeight(diagram.width, svgWidth, svgHeight)
   const borderColor = isHighlighted
     ? 'var(--color-primary, #4f46e5)'
     : mode === 'dark' ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)'
@@ -139,7 +136,7 @@ export const DiagramNode = memo(function DiagramNode({
       onPointerCancel={handlePointerCancel}
       style={{
         width: diagram.width,
-        minHeight: 300,
+        minHeight: MIN_CARD_HEIGHT,
         background: bgColor,
         border: `2px solid ${borderColor}`,
         borderRadius: 12,
@@ -288,7 +285,7 @@ export const DiagramNode = memo(function DiagramNode({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          minHeight: previewMinHeight,
+          minHeight: previewHeight,
           overflow: 'hidden',
           position: 'relative',
         }}

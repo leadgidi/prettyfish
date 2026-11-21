@@ -4,11 +4,11 @@
  * so agents can detect overlaps from disk logs.
  */
 import { useEffect, useRef } from 'react'
+import { cardHeightFor, findOverlappingBoxes } from '../lib/cardLayout'
 import type { Diagram, DiagramPage } from '../types'
 
 const LAYOUT_ENDPOINT = '/__prettyfish/watch/layout'
 const DEBOUNCE_MS = 350
-const LABEL_CHROME_PX = 72
 
 export type LayoutDiagramMeasurement = {
   id: string
@@ -41,34 +41,19 @@ export type LayoutSnapshot = {
   overlapCount: number
 }
 
-/** Same sizing rules as DiagramNode preview (scale never > 1). */
-export function estimateCardHeight(
-  width: number,
-  svgWidth: number | null,
-  svgHeight: number | null,
-): number {
-  if (svgWidth == null || svgHeight == null || svgWidth <= 0 || svgHeight <= 0) {
-    return 300
-  }
-  const scale = Math.min(1, Math.max(0, (width - 32) / svgWidth))
-  const preview = Math.max(240, Math.ceil(svgHeight * scale) + 8)
-  return Math.max(300, LABEL_CHROME_PX + preview)
-}
-
 function findOverlaps(
   diagrams: LayoutDiagramMeasurement[],
 ): Array<{ a: string; b: string }> {
-  const overlaps: Array<{ a: string; b: string }> = []
-  for (let i = 0; i < diagrams.length; i++) {
-    for (let j = i + 1; j < diagrams.length; j++) {
-      const a = diagrams[i]!
-      const b = diagrams[j]!
-      if (a.x < b.right && a.right > b.x && a.y < b.bottom && a.bottom > b.y) {
-        overlaps.push({ a: a.name, b: b.name })
-      }
-    }
-  }
-  return overlaps
+  return findOverlappingBoxes(
+    diagrams.map((diagram) => ({
+      id: diagram.id,
+      name: diagram.name,
+      x: diagram.x,
+      y: diagram.y,
+      width: diagram.width,
+      height: diagram.cardHeight,
+    })),
+  ).map(([a, b]) => ({ a: a.name, b: b.name }))
 }
 
 function measureDiagram(diagram: Diagram): LayoutDiagramMeasurement {
@@ -81,8 +66,7 @@ function measureDiagram(diagram: Diagram): LayoutDiagramMeasurement {
     ) as HTMLElement | null
     if (el?.offsetHeight) domHeight = el.offsetHeight
   }
-  const estimated = estimateCardHeight(diagram.width, svgWidth, svgHeight)
-  const cardHeight = Math.max(estimated, domHeight ?? 0)
+  const cardHeight = cardHeightFor(diagram, domHeight)
   return {
     id: diagram.id,
     name: diagram.name,
