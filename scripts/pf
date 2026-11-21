@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# Pretty Fish CLI: serve a project file, measure it through the open tab, pack pages.
+#
+# Usage:
+#   pf install [--ref REF] [--sha SHA] [--home DIR] [--skills-dir DIR] [--no-skill] [--force]
+#   pf watch start <doc.prettyfish.json> [--host H] [--port P]
+#   pf watch stop
+#   pf watch status [--base URL]
+#   pf watch set <doc.prettyfish.json> [--base URL]
+#   pf open [--base URL] [-- <opener args>]
+#   pf state [--base URL]
+#   pf tidy <doc.prettyfish.json> [--cols N] [--gap-x N] [--gap-y N] [--dry-run]
+#   pf check <doc.prettyfish.json> [--max-card-height N]
+#   pf validate <doc.prettyfish.json>
+#   pf docs list <doc>
+#   pf docs set <doc> --page NAME --diagram NAME [--name N] [--description D] [--code-file F]
+#   pf docs append <doc> (--page NAME | --new-page NAME) --name N [--description D] [--code-file F]
+#   pf docs replace-page <doc> --page NAME --payload-file F
+#   pf root            print the install directory
+#   pf skill-path      print the installed skill file
+#
+# Paths are always explicit; this CLI knows nothing about any repository.
+set -euo pipefail
+
+# Resolve this file through symlinks: the stable entry point $PRETTYFISH_HOME/pf
+# points into the installed build, and every path below is relative to that.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  TARGET="$(readlink "$SELF")"
+  case "$TARGET" in
+    /*) SELF="$TARGET" ;;
+    *) SELF="$(dirname "$SELF")/$TARGET" ;;
+  esac
+done
+SELF_DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+ROOT="$(cd -P "$SELF_DIR/.." && pwd)"
+HOME_DIR="${PRETTYFISH_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/leadgidi/prettyfish}"
+SKILL_NAME="prettyfish-tooling"
+RUN_DIR="$ROOT/.local-run"
+PID_FILE="$RUN_DIR/watch.pid"
+LOG_FILE="$RUN_DIR/watch.log"
+DEFAULT_HOST="${PRETTYFISH_WATCH_HOST:-127.0.0.1}"
+DEFAULT_PORT="${PRETTYFISH_WATCH_PORT:-5174}"
+PORTS=(5174 5173 5199)
+# Owned by cmd_install; the EXIT trap must read a global, not a local.
+TMP_DIR=""
+
+die() {
+  echo "$*" >&2
+  exit "${2:-1}"
+}
+
+usage() {
+  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-1}"
+}
+
+require_node() {
+  command -v node >/dev/null || die "node not found; Pretty Fish needs Node >= 22.6 (24 recommended)."
+  local major minor
+  read -r major minor < <(node -p "process.versions.node.split('.').slice(0, 2).join(' ')")
+  if (( major < 22 || (major == 22 && minor < 6) )); then
+    die "Node $(node -v) is too old; Pretty Fish needs >= 22.6 (24 recommended)."
+  fi
+}
+
+require_installed() {
+  [[ -d "$ROOT/node_modules" ]] || die "Dependencies missing in $ROOT. Run: pf install"
+  [[ -f "$ROOT/scripts/layout-tidy.mjs" ]] || die "$ROOT is not a Pretty Fish build. Run: pf install"
+}
+
+status_json() {
+  curl -sf --max-time 2 "$1/__prettyfish/watch/status"
+}
+
+detect_base() {
+  local preferred="${1:-}"
+  local candidates=()
+  if [[ -n "$preferred" ]]; then candidates+=("${preferred%/}"); fi
+  if [[ -n "${PRETTYFISH_WATCH_BASE:-}" ]]; then candidates+=("${PRETTYFISH_WATCH_BASE%/}"); fi
+  local port
+  for port in "${PORTS[@]}"; do candidates+=("http://$DEFAULT_HOST:$port"); done
+  local c
+  for c in "${candidates[@]}"; do
+    if status_json "$c" >/dev/null; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  # Empty on failure: callers must not mistake a default for a live server.
+  return 1
+}
+
+resolve_doc() {
+  local input="$1"
+  [[ -n "$input" ]] || die "Missing .prettyfish.json path"
+  local abs
+  abs="$(cd "$(dirname "$input")" && pwd)/$(basename "$input")"
+  [[ -f "$abs" ]] || die "File not found: $abs"
+  printf '%s\n' "$abs"
+}
+
+# ── install ──────────────────────────────────────────────────────────────────
+cmd_install() {
+  local ref="${PRETTYFISH_REF:-}" sha="${PRETTYFISH_SHA:-}" home="$HOME_DIR" skills_dir="${PRETTYFISH_SKILLS_DIR:-$HOME/.agents/skills}"
+  local register_skill=1 force=0 repo="${PRETTYFISH_REPO:-leadgidi/prettyfish}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ref) ref="${2:?}"; shift 2 ;;
+      --sha) sha="${2:?}"; shift 2 ;;
+      --home) home="${2:?}"; shift 2 ;;
+      --skills-dir) skills_dir="${2:?}"; shift 2 ;;
+      --no-skill) register_skill=0; shift ;;
+      --force) force=1; shift ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+  done
+
+  require_node
+  [[ -n "$ref" ]] || die "Missing ref. Pass --ref <tag|sha> (or set PRETTYFISH_REF)."
+
+  local target="$home/$ref"
+  if [[ "$force" -eq 0 && -f "$target/package.json" && -d "$target/node_modules" ]]; then
+    echo "Pretty Fish already installed: $target"
+    cmd_post_install "$home" "$skills_dir" "$register_skill"
+    return 0
+  fi
+
+  TMP_DIR="$(mktemp -d)"
+  trap 'if [[ -n "${TMP_DIR:-}" ]]; then rm -rf "$TMP_DIR"; fi' EXIT
+
+  if [[ -n "$sha" ]]; then
+    # git ls-remote is the authoritative view of the ref (the REST API and the
+    # archive CDN can both lag behind a just-moved tag).
+    local repo_url="https://github.com/$repo.git" resolved=""
+    resolved="$(git ls-remote "$repo_url" "refs/tags/$ref^{}" | awk '{print $1}')"
+    [[ -n "$resolved" ]] || resolved="$(git ls-remote "$repo_url" "refs/tags/$ref" | awk '{print $1}')"
+    [[ -n "$resolved" ]] || resolved="$(git ls-remote "$repo_url" "refs/heads/$ref" | awk '{print $1}')"
+    [[ -n "$resolved" ]] || resolved="$ref"
+    [[ "$resolved" == "$sha" ]] || die "Ref $ref resolves to $resolved, expected $sha. Review the pin before installing."
+    echo "Verified $repo $ref -> $resolved"
+  fi
+
+  # Fetch by commit, not by ref name: a re-created tag name can still be served
+  # from the archive CDN with the previous commit's content.
+  local fetch_ref="${sha:-$ref}"
+  echo "Downloading $repo $fetch_ref"
+  curl -fsSL -o "$TMP_DIR/src.tar.gz" "https://codeload.github.com/$repo/tar.gz/$fetch_ref"
+  mkdir -p "$TMP_DIR/src"
+  tar -xzf "$TMP_DIR/src.tar.gz" -C "$TMP_DIR/src" --strip-components=1
+  [[ -f "$TMP_DIR/src/scripts/pf" ]] || die "Archive does not contain scripts/pf; refusing to install."
+  [[ -f "$TMP_DIR/src/package-lock.json" ]] || die "Archive is missing package-lock.json; refusing to install unpinned dependencies."
+
+  mkdir -p "$home"
+  local stale
+  for stale in "$home"/*; do
+    [[ -d "$stale" ]] || continue
+    if [[ "$(cd -P "$stale" && pwd)" == "$target" ]]; then continue; fi
+    if [[ "$(basename "$stale")" == "pf" ]]; then continue; fi
+    echo "Removing previous build: $stale"
+    rm -rf "$stale"
+  done
+  rm -rf "$target"
+  cp -R "$TMP_DIR/src" "$target"
+
+  echo "Installing dependencies with npm ci"
+  (cd "$target" && npm ci --no-audit --no-fund)
+
+  # Stable entry point: survives pin bumps, always points at the current build.
+  ln -sfn "$target/scripts/pf" "$home/pf"
+
+  echo
+  echo "Pretty Fish installed: $target"
+  du -sh "$target" 2>/dev/null | sed 's/^/  size: /'
+  cmd_post_install "$home" "$skills_dir" "$register_skill"
+}
+
+# Copy the tool skill where Pi scans for skills, so it is advertised
+# machine-wide. A copy (not a symlink) cannot dangle when the pin moves and the
+# previous build directory is removed.
+cmd_post_install() {
+  local home="$1" skills_dir="$2" register="$3"
+  if [[ "$register" -eq 1 ]]; then
+    local install_root skill_src
+    install_root="$(cd -P "$(dirname "$(readlink "$home/pf")")/.." && pwd)"
+    skill_src="$install_root/skills/$SKILL_NAME"
+    [[ -f "$skill_src/SKILL.md" ]] || die "Installed build has no skill at $skill_src"
+    mkdir -p "$skills_dir"
+    rm -rf "$skills_dir/$SKILL_NAME"
+    cp -R "$skill_src" "$skills_dir/$SKILL_NAME"
+    echo "Registered skill: $skills_dir/$SKILL_NAME"
+  fi
+  echo "CLI: $home/pf"
+}
+
+# ── watch ────────────────────────────────────────────────────────────────────
+cmd_watch() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    start) watch_start "$@" ;;
+    stop) watch_stop ;;
+    status) watch_status "$@" ;;
+    set) watch_set "$@" ;;
+    *) usage ;;
+  esac
+}
+
+watch_start() {
+  local doc="" host="$DEFAULT_HOST" port="$DEFAULT_PORT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host) host="${2:?}"; shift 2 ;;
+      --port) port="${2:?}"; shift 2 ;;
+      *) doc="$1"; shift ;;
+    esac
+  done
+  local abs; abs="$(resolve_doc "$doc")"
+  require_installed
+  mkdir -p "$RUN_DIR"
+
+  if live="$(detect_base 2>/dev/null)"; then
+    echo "Watch already live at $live — retargeting to $abs" >&2
+    (cd "$ROOT" && PRETTYFISH_WATCH_BASE="$live" node scripts/watch-ctl.mjs set "$abs" >/dev/null)
+    status_json "$live"; echo; echo "URL: $live"; return 0
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2
+      die "Port $port is already in use; pass --port."
+    fi
+  fi
+
+  # Fully detached: the agent's shell must not stay attached to the server.
+  ( cd "$ROOT" && nohup node scripts/dev-watch.mjs "$abs" --host "$host" --port "$port" \
+      >"$LOG_FILE" 2>&1 </dev/null & echo $! >"$PID_FILE" ) >/dev/null 2>&1
+
+  local base="http://$host:$port" ok=0
+  for _ in $(seq 1 30); do
+    if status_json "$base" >/dev/null; then ok=1; break; fi
+    if live="$(detect_base 2>/dev/null)"; then base="$live"; ok=1; break; fi
+    sleep 0.5
+  done
+  [[ "$ok" -eq 1 ]] || { tail -40 "$LOG_FILE" >&2 || true; die "Watch did not become ready."; }
+
+  echo "pid=$(cat "$PID_FILE")"
+  echo "log=$LOG_FILE"
+  echo "doc=$abs"
+  status_json "$base"; echo; echo "URL: $base"
+}
+
+watch_stop() {
+  local stopped=0
+  if [[ -f "$PID_FILE" ]]; then
+    local pid; pid="$(cat "$PID_FILE" || true)"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      echo "stopped pid=$pid"
+      stopped=1
+    fi
+    rm -f "$PID_FILE"
+  fi
+  local port
+  for port in "${PORTS[@]}"; do
+    local pids
+    pids=""
+    if command -v lsof >/dev/null 2>&1; then
+      pids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    fi
+    [[ -n "$pids" ]] || continue
+    echo "$pids" | xargs -r kill 2>/dev/null || true
+    echo "stopped listener port=$port"
+    stopped=1
+  done
+  [[ "$stopped" -eq 1 ]] || echo "nothing running"
+}
+
+watch_status() {
+  local base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --base) base="${2:?}"; shift 2 ;; *) shift ;; esac
+  done
+  base="$(detect_base "$base" 2>/dev/null || true)"
+  [[ -n "$base" ]] || die "No watch server running."
+  status_json "$base" || die "No watch server at $base"
+  echo "base=$base"
+}
+
+watch_set() {
+  local doc="" base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --base) base="${2:?}"; shift 2 ;; *) doc="$1"; shift ;; esac
+  done
+  local abs; abs="$(resolve_doc "$doc")"
+  base="$(detect_base "$base" 2>/dev/null || true)"
+  [[ -n "$base" ]] || die "No watch server running."
+  ( cd "$ROOT" && PRETTYFISH_WATCH_BASE="$base" node scripts/watch-ctl.mjs set "$abs" )
+  echo "base=$base"
+}
+
+# ── open / state / tidy / check / validate ───────────────────────────────────
+cmd_open() {
+  local base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --base) base="${2:?}"; shift 2 ;; --) shift; break ;; *) break ;; esac
+  done
+  base="$(detect_base "$base" 2>/dev/null || true)"
+  [[ -n "$base" ]] || die "No watch server running. Start one with: pf watch start <doc>"
+  local url="$base/"
+  if command -v open >/dev/null 2>&1; then open "$url"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1
+  elif command -v cmd.exe >/dev/null 2>&1; then cmd.exe /c start "" "$url" >/dev/null 2>&1
+  else die "No desktop opener found (open / xdg-open / start). Open $url yourself."
+  fi
+  echo "opened $url"
+}
+
+cmd_state() {
+  local base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --base) base="${2:?}"; shift 2 ;; *) shift ;; esac
+  done
+  base="$(detect_base "$base" 2>/dev/null || true)"
+  [[ -n "$base" ]] || die "No watch server running. Start one with: pf watch start <doc>"
+  curl -sf "$base/__prettyfish/watch/state" || die "No state from $base"
+  echo
+}
+
+mjs() {
+  require_installed
+  ( cd "$ROOT" && node --experimental-strip-types "$@" )
+}
+
+cmd_tidy() {
+  local doc="${1:?doc path required}"; shift
+  doc="$(resolve_doc "$doc")"
+  mjs scripts/layout-tidy.mjs "$doc" "$@"
+}
+
+cmd_check() {
+  local doc="${1:?doc path required}"; shift
+  doc="$(resolve_doc "$doc")"
+  mjs scripts/layout-tidy.mjs "$doc" --check "$@"
+}
+
+cmd_validate() {
+  local doc="${1:?doc path required}"; shift
+  doc="$(resolve_doc "$doc")"
+  mjs scripts/validate-project.mjs "$doc" "$@"
+}
+
+# ── docs helpers ─────────────────────────────────────────────────────────────
+cmd_docs() {
+  local sub="${1:-}"; shift || true
+  local script
+  case "$sub" in
+    list) script="list-diagrams.py" ;;
+    set) script="set-diagram.py" ;;
+    append) script="append-diagram.py" ;;
+    replace-page) script="replace-page.py" ;;
+    *) usage ;;
+  esac
+  local doc="${1:?doc path required}"; shift
+  doc="$(resolve_doc "$doc")"
+  python3 "$ROOT/scripts/docs/$script" "$doc" "$@"
+}
+
+# ── entry ────────────────────────────────────────────────────────────────────
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  install) cmd_install "$@" ;;
+  watch) cmd_watch "$@" ;;
+  open) cmd_open "$@" ;;
+  state) cmd_state "$@" ;;
+  tidy) cmd_tidy "$@" ;;
+  check) cmd_check "$@" ;;
+  validate) cmd_validate "$@" ;;
+  docs) cmd_docs "$@" ;;
+  root) echo "$ROOT" ;;
+  skill-path) echo "$ROOT/skills/$SKILL_NAME/SKILL.md" ;;
+  -h|--help|help) usage 0 ;;
+  *) usage ;;
+esac
