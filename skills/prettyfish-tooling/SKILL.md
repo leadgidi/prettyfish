@@ -15,13 +15,22 @@ Set `DOC` to the absolute path of the `.prettyfish.json` file. Quote both paths 
 
 ## Create and show a map
 
-For a new map, use the write tool to save a draft JSON file in a temporary directory. Do not save it at `DOC`. Use this shape:
+For a new map, write a temporary Markdown draft. Use `#` for a page and `##` for a card. Put an optional description before each Mermaid block.
 
-```json
-{"pages":[{"name":"Overview","diagrams":[{"name":"Request path","code":"flowchart LR\n  Request --> Response"}]}]}
+````markdown
+# L0: Overview
+
+## Request path
+
+Show what the caller receives.
+
+```mermaid
+flowchart LR
+  Client --> Probe["GET /credits"]
 ```
+````
 
-Put pages and cards in reading order. Add a `description` when a card needs context. Omit IDs, selections, and positions. Use commas instead of semicolons in sequence messages and notes. Quote flowchart labels that contain punctuation.
+Quote flowchart labels. Use commas instead of semicolons in sequence messages and notes.
 
 Run `"$PF" present "$DOC" --draft "$DRAFT"` with the draft's path. If validation fails, fix the draft and retry the same command. Use `"$PF" present "$DOC"` after editing an existing map. Both forms reuse the viewer when it is open, pack the cards, and check for overlaps and oversized cards. Report the map path and check result.
 
