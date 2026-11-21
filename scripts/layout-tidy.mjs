@@ -2,11 +2,15 @@
 /**
  * Pack a .prettyfish.json project so page cards never overlap.
  *
- * A diagram persists x/y/width only; its height comes from the rendered
- * Mermaid SVG. Guessing that height is what produces overlaps, so this script
- * does not guess: it drives the real app in headless Chromium, reads the
- * measured card footprint from window.__prettyfishLayoutSnapshot, and re-packs
- * every page with the same code the canvas uses (src/lib/cardLayout.ts).
+ * A diagram persists x/y/width only; its height exists only after Mermaid
+ * renders, which needs a real layout engine. So this tool does not measure —
+ * it asks the app that already has the file open, through
+ * GET /__prettyfish/watch/state, which reports the card heights and overlaps
+ * it measured for the exact document hash on disk.
+ *
+ * Requirement: the watch server must be running for this file AND a browser tab
+ * must have the page open. There is no headless fallback: without a rendered
+ * tab there is no measurement.
  *
  * Usage:
  *   node --experimental-strip-types scripts/layout-tidy.mjs <project.prettyfish.json> [flags]
@@ -17,21 +21,18 @@
  *   --cols N             cards per row (default 2)
  *   --gap-x N            horizontal gap in px (default 100)
  *   --gap-y N            vertical gap in px (default 120)
- *   --check              measure and report only; exit 1 on overlap or oversize
+ *   --check              report only; exit 1 on overlap or an oversize card
  *   --dry-run            print the new positions without writing
  *   --max-card-height N  fail --check when a card is taller (default 1400, 0 disables)
- *   --base URL           use a specific Pretty Fish server instead of starting one
- *   --port N             port for a server this script starts (default 5199)
- *   --timeout MS         render/startup budget (default 90000)
- *   --verbose            inherit the dev server output
+ *   --base URL           watch server base (default: first live one watching this file)
+ *   --timeout MS         how long to wait for the tab to report (default 30000)
+ *   --verbose            print every state poll
  *
- * Exit codes: 0 clean, 1 layout problem (--check), 2 setup or render failure.
+ * Exit codes: 0 clean, 1 layout problem (--check), 2 no measurement or bad setup.
  */
-import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { chromium } from 'playwright'
 import {
   DEFAULT_PACK_COLS,
   DEFAULT_PACK_GAP_X,
@@ -41,15 +42,9 @@ import {
   packedPageHeight,
 } from '../src/lib/cardLayout.ts'
 
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const REUSE_PORTS = [5174, 5173, 5199]
+const CANDIDATE_PORTS = [5174, 5173, 5199]
 const DEFAULT_OVERSIZE_PX = 1400
-/**
- * A running dev server can serve a stale module graph, so a reused server only
- * gets a short budget: if it does not publish a snapshot quickly, this script
- * starts its own server from current source instead.
- */
-const REUSE_PROBE_MS = 10_000
+const POLL_MS = 400
 
 function printUsage(exitCode = 2) {
   console.error(`Usage:
@@ -57,7 +52,10 @@ function printUsage(exitCode = 2) {
 
 Flags:
   --cols N  --gap-x N  --gap-y N  --check  --dry-run
-  --max-card-height N  --base URL  --port N  --timeout MS  --verbose
+  --max-card-height N  --base URL  --timeout MS  --verbose
+
+The watch server must be running for that file and a browser tab must have it
+open: measurements come from the rendered app, not from a headless browser.
 `)
   process.exit(exitCode)
 }
@@ -72,8 +70,7 @@ function parseArgs(argv) {
     dryRun: false,
     maxCardHeight: DEFAULT_OVERSIZE_PX,
     base: process.env.PRETTYFISH_WATCH_BASE?.trim().replace(/\/$/, '') ?? '',
-    port: 5199,
-    timeout: 90_000,
+    timeout: 30_000,
     verbose: false,
   }
 
@@ -90,7 +87,6 @@ function parseArgs(argv) {
     else if (arg === '--gap-y') options.gapY = Number(next())
     else if (arg === '--max-card-height') options.maxCardHeight = Number(next())
     else if (arg === '--base') options.base = next().replace(/\/$/, '')
-    else if (arg === '--port') options.port = Number(next())
     else if (arg === '--timeout') options.timeout = Number(next())
     else if (arg === '--check') options.check = true
     else if (arg === '--dry-run') options.dryRun = true
@@ -106,7 +102,7 @@ function parseArgs(argv) {
   }
 
   if (!options.file) printUsage()
-  for (const key of ['cols', 'gapX', 'gapY', 'maxCardHeight', 'port', 'timeout']) {
+  for (const key of ['cols', 'gapX', 'gapY', 'maxCardHeight', 'timeout']) {
     if (!Number.isFinite(options[key]) || options[key] < 0) {
       console.error(`Invalid value for --${key}`)
       printUsage()
@@ -116,24 +112,18 @@ function parseArgs(argv) {
     console.error('--cols must be at least 1')
     printUsage()
   }
-
   return options
 }
 
-async function readJsonFile(file) {
-  const raw = await fs.readFile(file, 'utf8')
-  try {
-    return JSON.parse(raw)
-  } catch (error) {
-    throw new Error(`${file} is not valid JSON: ${error.message}`)
-  }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function hashFile(file) {
+  return createHash('sha256').update(await fs.readFile(file)).digest('hex')
 }
 
-async function fetchStatus(base) {
+async function getJson(url) {
   try {
-    const res = await fetch(`${base}/__prettyfish/watch/status`, {
-      signal: AbortSignal.timeout(1500),
-    })
+    const res = await fetch(url, { signal: AbortSignal.timeout(2000) })
     if (!res.ok) return null
     return await res.json()
   } catch {
@@ -141,186 +131,97 @@ async function fetchStatus(base) {
   }
 }
 
-async function retargetServer(base, docPath) {
-  const res = await fetch(`${base}/__prettyfish/watch/file`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: docPath }),
-    signal: AbortSignal.timeout(5000),
-  })
-  if (!res.ok) throw new Error(`Failed to watch ${docPath} on ${base}: ${await res.text()}`)
-}
-
-async function waitForStatus(base, docPath, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const status = await fetchStatus(base)
-    if (status?.enabled && status.path === docPath) return status
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  throw new Error(`Timed out waiting for ${base} to watch ${docPath}`)
-}
-
-function expectedDiagramCount(project) {
-  return (project.pages ?? []).reduce((total, page) => total + (page.diagrams?.length ?? 0), 0)
-}
-
-/** Measure the project by reading the layout the app publishes for itself. */
-async function snapshotFrom(browser, base, project, timeoutMs, fileLabel) {
-  const expectedCount = expectedDiagramCount(project)
-  if (expectedCount === 0) throw new Error('Project has no diagrams to measure')
-
-  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } })
-  try {
-    await page.goto(base, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    await page.waitForFunction(
-      (count) => {
-        const snapshot = window.__prettyfishLayoutSnapshot
-        return Boolean(snapshot) && snapshot.totalDiagrams === count && snapshot.readyDiagrams === count
-      },
-      expectedCount,
-      { timeout: timeoutMs },
-    )
-    await page.evaluate(() => document.fonts?.ready)
-    const snapshot = await page.evaluate(() => window.__prettyfishLayoutSnapshot)
-    const expectedPageIds = (project.pages ?? []).map((projectPage) => projectPage.id).sort()
-    const pageIds = snapshot.pages.map((snapshotPage) => snapshotPage.pageId).sort()
-    if (pageIds.join() !== expectedPageIds.join()) {
-      throw new Error(
-        `rendered a different project: expected pages ${expectedPageIds.join(', ')}, got ${pageIds.join(', ')}`,
-      )
-    }
-
-    const failed = snapshot.pages.flatMap((snapshotPage) =>
-      snapshotPage.diagrams
-        .filter((diagram) => diagram.renderStatus === 'error')
-        .map((diagram) => `${snapshotPage.pageName} / ${diagram.name}`),
-    )
-    if (failed.length > 0) {
-      throw new Error(
-        `diagrams failed to render:\n  ${failed.join('\n  ')}\n` +
-          `run npm run validate:project -- ${fileLabel} to see the Mermaid errors`,
-      )
-    }
-
-    return snapshot
-  } finally {
-    await page.close()
-  }
-}
-
-async function startOwnServer(options, docPath) {
-  const base = `http://127.0.0.1:${options.port}`
-  const existing = await fetchStatus(base)
-  if (existing) {
-    throw new Error(
-      `port ${options.port} already serves a Pretty Fish server (watching ${existing.path ?? 'unknown'}); pass --port or --base`,
-    )
-  }
-
-  const child = spawn(
-    process.execPath,
-    ['scripts/dev-watch.mjs', docPath, '--port', String(options.port)],
-    {
-      cwd: PROJECT_ROOT,
-      // detached so the whole group (node, npx, vite) can be stopped as one unit
-      detached: true,
-      stdio: options.verbose ? 'inherit' : 'ignore',
-      env: { ...process.env, PRETTYFISH_WATCH_FILE: docPath },
-    },
-  )
-  child.unref?.()
-
-  const stop = () => {
-    if (!child.pid) return
-    try {
-      process.kill(-child.pid, 'SIGTERM')
-    } catch {
-      // already gone
-    }
-  }
-
-  try {
-    await waitForStatus(base, docPath, options.timeout)
-  } catch (error) {
-    stop()
-    throw new Error(`${error.message}. Port ${options.port} may be busy; pass --port, --base, or --verbose.`)
-  }
-  return { base, stop }
-}
-
 /**
- * Measure through a server that is definitely running current source: reuse a
- * healthy watch server when it answers immediately, otherwise start our own.
+ * Find the watch server for this exact file. A server watching another file is
+ * an error, not something to silently retarget: measurements would be wrong.
  */
-async function resolveSnapshot(options, project, docPath) {
-  const browser = await chromium.launch({ headless: true })
-  const problems = []
-  let owned = null
-
-  try {
-    if (options.base) {
-      const status = await fetchStatus(options.base)
-      if (!status?.enabled) throw new Error(`${options.base} is not a Pretty Fish watch server`)
-      if (status.path !== docPath) await retargetServer(options.base, docPath)
-      return {
-        base: options.base,
-        snapshot: await snapshotFrom(browser, options.base, project, options.timeout, options.file),
-        owned: null,
-      }
+async function resolveBase(options, docPath) {
+  const candidates = options.base ? [options.base] : CANDIDATE_PORTS.map((port) => `http://127.0.0.1:${port}`)
+  const seen = []
+  for (const base of candidates) {
+    const status = await getJson(`${base}/__prettyfish/watch/status`)
+    if (!status?.enabled) {
+      seen.push(`${base}: not a watch server`)
+      continue
     }
-
-    for (const port of REUSE_PORTS) {
-      const base = `http://127.0.0.1:${port}`
-      const status = await fetchStatus(base)
-      if (!status?.enabled || status.path !== docPath) continue
-      try {
-        return {
-          base,
-          snapshot: await snapshotFrom(browser, base, project, REUSE_PROBE_MS, options.file),
-          owned: null,
-        }
-      } catch (error) {
-        problems.push(`${base}: ${error.message}`)
-        if (options.verbose) console.error(`[layout-tidy] not reusing ${base}: ${error.message}`)
-      }
+    if (status.path !== docPath) {
+      seen.push(`${base}: watching ${status.path ?? '(none)'}`)
+      continue
     }
-
-    const started = await startOwnServer(options, docPath)
-    owned = started
-    return {
-      base: started.base,
-      snapshot: await snapshotFrom(browser, started.base, project, options.timeout, options.file),
-      owned,
-    }
-  } catch (error) {
-    owned?.stop()
-    const details = problems.length > 0 ? `\n  ${problems.join('\n  ')}` : ''
-    throw new Error(`${error.message}${details}`)
-  } finally {
-    await browser.close()
+    return base
   }
+  throw new Error(
+    `No prettyfish watch server is serving this file.\n  tried:\n  ${seen.join('\n  ') || '(none)'}\n` +
+      `Start one: .agents/skills/prettyfish-docs/scripts/watch-start.sh ${docPath}`,
+  )
 }
 
-function layoutProblems(project, snapshot, options) {
+function phaseRemedy(phase, base) {
+  if (phase === 'no-tab') return `No browser tab has ${base} open. Open it, then re-run.`
+  if (phase === 'stale-app') return `The open tab is showing an older version of the file; it reloads on save. Wait a moment, then re-run.`
+  if (phase === 'rendering') return `The open tab is still rendering. Wait a moment, then re-run.`
+  return ''
+}
+
+/** Wait until the app reports measurements for exactly this document content. */
+async function waitForMeasurement(base, docHash, timeoutMs, verbose) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const state = await getJson(`${base}/__prettyfish/watch/state?hash=${docHash}`)
+    last = state
+    if (verbose && state) console.error(`[layout-tidy] phase=${state.phase} ${state.reason ?? ''}`)
+    if (state?.phase === 'ready' && state.docHash === docHash) return state
+    if (state?.phase === 'error') {
+      const failed = (state.pages ?? []).flatMap((page) =>
+        (page.diagrams ?? [])
+          .filter((diagram) => diagram.renderStatus === 'error')
+          .map((diagram) => `${page.pageName} / ${diagram.name}`),
+      )
+      throw new Error(`Diagrams failed to render:\n  ${failed.join('\n  ')}`)
+    }
+    await sleep(POLL_MS)
+  }
+  const phase = last?.phase ?? 'unreachable'
+  throw new Error(
+    `The app never reported measurements for this file (phase=${phase}${last?.reason ? `, ${last.reason}` : ''}).\n` +
+      `${phaseRemedy(phase, base)}`.trimEnd(),
+  )
+}
+
+function cardsFor(project, state) {
+  const pages = []
+  for (const page of project.pages ?? []) {
+    const measured = (state.pages ?? []).find((candidate) => candidate.pageId === page.id)
+    if (!measured) throw new Error(`The app reported no measurements for page "${page.name}"`)
+    const byId = new Map((measured.diagrams ?? []).map((diagram) => [diagram.id, diagram]))
+    const cards = (page.diagrams ?? []).map((diagram) => {
+      const live = byId.get(diagram.id)
+      if (!live) throw new Error(`The app reported no measurement for "${diagram.name}" on page "${page.name}"`)
+      return { id: diagram.id, width: diagram.width, height: live.cardHeight }
+    })
+    pages.push({ page, measured, cards })
+  }
+  return pages
+}
+
+function report(project, state, options) {
   const problems = []
   const oversize = []
-
   for (const page of project.pages ?? []) {
-    const snapshotPage = snapshot.pages.find((candidate) => candidate.pageId === page.id)
-    const measuredById = new Map((snapshotPage?.diagrams ?? []).map((diagram) => [diagram.id, diagram]))
+    const measured = (state.pages ?? []).find((candidate) => candidate.pageId === page.id)
+    const byId = new Map((measured?.diagrams ?? []).map((diagram) => [diagram.id, diagram]))
     const boxes = (page.diagrams ?? []).map((diagram) => {
-      const measured = measuredById.get(diagram.id)
+      const live = byId.get(diagram.id)
       return {
         id: diagram.id,
-        name: measured?.name ?? diagram.name ?? diagram.id,
+        name: live?.name ?? diagram.name ?? diagram.id,
         x: diagram.x,
         y: diagram.y,
         width: diagram.width,
-        height: measured?.cardHeight ?? 0,
+        height: live?.cardHeight ?? 0,
       }
     })
-
     for (const [a, b] of findOverlappingBoxes(boxes)) {
       problems.push(`${page.name}: "${a.name}" overlaps "${b.name}"`)
     }
@@ -330,33 +231,18 @@ function layoutProblems(project, snapshot, options) {
       }
     }
   }
-
   return { problems, oversize }
 }
 
-function packProject(project, snapshot, options) {
+function pack(project, state, options) {
   const updates = []
   const summary = []
-
-  for (const page of project.pages ?? []) {
-    const snapshotPage = snapshot.pages.find((candidate) => candidate.pageId === page.id)
-    if (!snapshotPage) throw new Error(`No measurements for page "${page.name}"`)
-
-    const measuredById = new Map(snapshotPage.diagrams.map((diagram) => [diagram.id, diagram]))
-    const cards = (page.diagrams ?? []).map((diagram) => {
-      const measured = measuredById.get(diagram.id)
-      if (!measured) {
-        throw new Error(`No measurement for diagram "${diagram.name ?? diagram.id}" on page "${page.name}"`)
-      }
-      return { id: diagram.id, width: diagram.width, height: measured.cardHeight }
-    })
-
+  for (const { page, cards } of cardsFor(project, state)) {
     const positions = packCards(cards, { cols: options.cols, gapX: options.gapX, gapY: options.gapY })
-    const positionById = new Map(positions.map((position) => [position.id, position]))
-
+    const byId = new Map(positions.map((position) => [position.id, position]))
     let moved = 0
     for (const diagram of page.diagrams ?? []) {
-      const position = positionById.get(diagram.id)
+      const position = byId.get(diagram.id)
       if (diagram.x !== position.x || diagram.y !== position.y) {
         updates.push({
           page: page.name,
@@ -369,28 +255,12 @@ function packProject(project, snapshot, options) {
         moved += 1
       }
     }
-
-    const packedBoxes = cards.map((card) => {
-      const position = positionById.get(card.id)
-      return { ...card, x: position.x, y: position.y }
-    })
-    const remaining = findOverlappingBoxes(packedBoxes)
-    if (remaining.length > 0) {
-      throw new Error(`Packing left ${remaining.length} overlap(s) on page "${page.name}"; packCards is broken`)
-    }
-
-    summary.push({
-      page: page.name,
-      cards: cards.length,
-      height: packedPageHeight(cards, positions),
-      moved,
-    })
+    summary.push({ page: page.name, cards: cards.length, height: packedPageHeight(cards, positions), moved })
   }
-
   return { updates, summary }
 }
 
-function printSummary(summary, updates, oversize, maxCardHeight) {
+function printSummary(summary, updates, oversize, options) {
   console.log('page'.padEnd(42), 'cards', 'pageHeight', 'moved')
   for (const row of summary) {
     console.log(
@@ -403,48 +273,57 @@ function printSummary(summary, updates, oversize, maxCardHeight) {
   for (const update of updates) {
     console.log(`  ${update.page}: "${update.diagram}" (${update.from.join(',')}) -> (${update.to.join(',')})`)
   }
-  if (oversize.length > 0) {
-    console.warn(`\nTall cards (over ${maxCardHeight}px is a doc smell, split the diagram):`)
+  if (oversize.length > 0 && options.check) {
+    for (const line of oversize) console.error(`oversize: ${line}`)
+  } else if (oversize.length > 0) {
+    console.warn(`\nTall cards (over ${options.maxCardHeight}px: split the diagram):`)
     for (const line of oversize) console.warn(`  ${line}`)
   }
 }
 
 const options = parseArgs(process.argv.slice(2))
 const docPath = path.resolve(process.cwd(), options.file)
-const project = await readJsonFile(docPath)
 
 try {
-  const { snapshot, owned } = await resolveSnapshot(options, project, docPath)
-  try {
-    const { problems, oversize } = layoutProblems(project, snapshot, options)
+  const project = JSON.parse(await fs.readFile(docPath, 'utf8'))
+  const base = await resolveBase(options, docPath)
+  const state = await waitForMeasurement(base, await hashFile(docPath), options.timeout, options.verbose)
 
-    if (options.check) {
-      const clean = problems.length === 0 && oversize.length === 0
-      if (clean) {
-        console.log(`layout:check clean - ${expectedDiagramCount(project)} diagrams, no overlaps`)
-      } else {
-        for (const line of problems) console.error(line)
-        for (const line of oversize) console.error(`oversize: ${line}`)
-        console.error(`\nlayout:check failed - run npm run layout:tidy -- ${options.file}`)
-      }
-      // --check never writes. Set the code instead of exiting, so the finally
-      // below still stops a server we started.
-      process.exitCode = clean ? 0 : 1
+  if (options.check) {
+    const { problems, oversize } = report(project, state, options)
+    printSummary([], [], oversize, options)
+    if (problems.length === 0 && oversize.length === 0) {
+      console.log(`layout:check clean - ${state.totalDiagrams} diagrams, no overlaps (measured by ${base})`)
     } else {
-      const { updates, summary } = packProject(project, snapshot, options)
-      printSummary(summary, updates, oversize, options.maxCardHeight)
+      for (const line of problems) console.error(line)
+      console.error(`\nlayout:check failed - run npm run layout:tidy -- ${options.file}`)
+      process.exitCode = 1
+    }
+  } else {
+    const { problems, oversize } = report(project, state, options)
+    const { updates, summary } = pack(project, state, options)
+    printSummary(summary, updates, oversize, options)
 
-      if (updates.length === 0) {
-        console.log('\nno position changes needed')
-      } else if (options.dryRun) {
-        console.log(`\ndry run: ${updates.length} position change(s) not written`)
+    if (updates.length === 0) {
+      console.log('\nno position changes needed')
+    } else if (options.dryRun) {
+      console.log(`\ndry run: ${updates.length} position change(s) not written`)
+    } else {
+      await fs.writeFile(docPath, `${JSON.stringify(project, null, 2)}\n`)
+      // The app reloads on save; the final verdict comes from the renderer.
+      const after = await waitForMeasurement(base, await hashFile(docPath), options.timeout, options.verbose)
+      const verification = report(project, after, options)
+      if (verification.problems.length > 0) {
+        for (const line of verification.problems) console.error(line)
+        console.error('\nthe app still reports overlaps after packing')
+        process.exitCode = 2
       } else {
-        await fs.writeFile(docPath, `${JSON.stringify(project, null, 2)}\n`)
-        console.log(`\nwrote ${options.file} (${updates.length} position change(s))`)
+        console.log(
+          `\nwrote ${options.file} (${updates.length} position change(s))` +
+            `${problems.length > 0 ? `, cleared ${problems.length} overlap(s)` : ''} - app reports no overlaps`,
+        )
       }
     }
-  } finally {
-    owned?.stop()
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))

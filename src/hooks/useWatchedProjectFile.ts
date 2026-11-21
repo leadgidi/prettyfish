@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { Dispatch } from 'react'
 
 import { normalizeAppState } from '../lib/documentState'
+import { setWatchedDocHash } from '../lib/watchDocHash'
 import { withRuntimePagesState } from '../types'
 import type { AppAction } from '../state/appStore'
 
@@ -30,6 +31,7 @@ export function useWatchedProjectFile(dispatch: Dispatch<AppAction>): void {
         console.warn('[prettyfish-watch] failed to load project', response.status, body)
         return
       }
+      setWatchedDocHash(response.headers.get('X-PrettyFish-Doc-Hash'))
       const rawText = await response.text()
       if (rawText === lastPayloadRef.current) return
 

@@ -56,31 +56,56 @@ Each snapshot lists every page’s diagrams with `x`, `y`, `width`, `cardHeight`
 
 ## Pack pages so cards never overlap
 
-A diagram persists `x`/`y`/`width` only. Its height comes from the rendered
-Mermaid SVG, so a hand-written `y` cannot be checked and will eventually overlap.
-Do not guess: measure.
+A diagram persists `x`/`y`/`width` only. Its height exists only after Mermaid
+renders, so the tool that packs a page asks the app that already has the file
+open instead of measuring anything itself. No headless browser is involved.
 
 ```bash
+# 1. serve the file and open it in any browser
+npm run dev:watch -- /absolute/path/to/project.prettyfish.json
+open http://127.0.0.1:5174/          # xdg-open on Linux, start on Windows
+
+# 2. pack (writes x/y, then re-asks the app and fails if overlaps remain)
 npm run layout:tidy -- /absolute/path/to/project.prettyfish.json
+
+# report only: writes nothing, exits 1 on overlap or an oversize card
 npm run layout:check -- /absolute/path/to/project.prettyfish.json
 ```
 
-- `layout:tidy` drives the real app in headless Chromium, reads the measured card
-  footprint from `window.__prettyfishLayoutSnapshot`, and re-packs every page
-  (default 2 columns, 100/120px gaps) using the same `packCards` code the canvas
-  uses. It rewrites `x`/`y` only, and is idempotent: a second run changes nothing.
-- `layout:check` writes nothing and exits 1 when any card overlaps or exceeds
-  `--max-card-height` (default 1400px). Use it as a gate.
-- Without `--base` the script reuses a watch server already watching that file,
-  otherwise it starts its own on `--port 5199` and stops it afterwards. A reused
-  server gets 10s to answer; if it serves a stale module graph the script starts
-  its own from current source.
+### The measurement contract
+
+```
+GET /__prettyfish/watch/state[?hash=<sha256>]
+{
+  "phase": "ready" | "no-tab" | "rendering" | "stale-app" | "error",
+  "reason": "...",
+  "docHash": "<sha256 of the file on disk>",
+  "appliedHash": "<sha256 the tab applied>",
+  "watchingTabs": 1,
+  "readyDiagrams": 19, "totalDiagrams": 19,
+  "pages": [{ "pageId": "...", "pageName": "...",
+              "diagrams": [{ "id": "...", "name": "...", "x": 0, "y": 0,
+                             "width": 900, "cardHeight": 729,
+                             "svgWidth": 1038.6, "svgHeight": 775.7,
+                             "renderStatus": "ready" }],
+              "overlaps": [] }]
+}
+```
+
+The watch server stamps `GET /__prettyfish/watch/project` with
+`X-PrettyFish-Doc-Hash`, the app echoes that hash in its measurements, and the
+state endpoint compares it against the file on disk. That is how `stale-app`
+is detected instead of silently packing from an old render.
+
+Anything other than `phase: "ready"` is a hard failure. Without an open tab
+there is no measurement, and there is no fallback path.
 
 Flags: `--cols`, `--gap-x`, `--gap-y`, `--dry-run`, `--max-card-height`,
-`--base`, `--port`, `--timeout`, `--verbose`.
+`--base`, `--timeout`, `--verbose`.
 
 Authoring rule: order in `pages[].diagrams` is the reading order (row-major), so
-append diagrams in narrative order and let the packer assign coordinates.
+append diagrams in narrative order and let the packer assign coordinates. The
+result is stored in the file, so opening the project later needs no tooling.
 
 ## Validate a project file
 

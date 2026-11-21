@@ -5,9 +5,15 @@
  */
 import { useEffect, useRef } from 'react'
 import { cardHeightFor, findOverlappingBoxes } from '../lib/cardLayout'
+import { getWatchedDocHash } from '../lib/watchDocHash'
 import type { Diagram, DiagramPage } from '../types'
 
 const LAYOUT_ENDPOINT = '/__prettyfish/watch/layout'
+/** One id per page load: a reload is a new measurement source. */
+const TAB_ID =
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`
 const DEBOUNCE_MS = 350
 
 export type LayoutDiagramMeasurement = {
@@ -34,6 +40,10 @@ export type LayoutPageMeasurement = {
 
 export type LayoutSnapshot = {
   ts: string
+  /** Stable id for this tab, so several tabs can be told apart. */
+  tabId: string
+  /** Hash of the watched document these measurements belong to. */
+  docHash: string | null
   activePageId: string
   pages: LayoutPageMeasurement[]
   readyDiagrams: number
@@ -113,6 +123,8 @@ function buildSnapshot(pages: DiagramPage[], activePageId: string): LayoutSnapsh
   })
   return {
     ts: new Date().toISOString(),
+    tabId: TAB_ID,
+    docHash: getWatchedDocHash(),
     activePageId,
     pages: pageMeasurements,
     readyDiagrams,
@@ -134,9 +146,11 @@ export function useLayoutTelemetry(pages: DiagramPage[], activePageId: string): 
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
       const snapshot = buildSnapshot(pages, activePageId)
-      // Publish for headless tooling even before the first POST succeeds.
+      // Publish for tooling even before the first POST succeeds.
       window.__prettyfishLayoutSnapshot = snapshot
-      // Prefer logging once we have at least one ready diagram.
+      // Without a document identity the measurement cannot be matched to a
+      // file, so it is not a measurement yet.
+      if (!snapshot.docHash) return
       if (snapshot.readyDiagrams === 0) return
       const payload = JSON.stringify(snapshot)
       if (payload === lastPayloadRef.current) return

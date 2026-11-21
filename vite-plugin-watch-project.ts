@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Plugin, ViteDevServer } from 'vite'
@@ -13,6 +14,19 @@ type WatchSession = {
   closeWatcher: () => void
 }
 
+/** Phase reported by GET /__prettyfish/watch/state — the only supported contract. */
+type WatchMeasurePhase = 'no-tab' | 'rendering' | 'stale-app' | 'error' | 'ready'
+
+type MeasureSnapshot = {
+  tabId?: string
+  docHash?: string
+  readyDiagrams?: number
+  totalDiagrams?: number
+  pages?: Array<{ diagrams?: Array<{ renderStatus?: string | null }> }>
+  [key: string]: unknown
+}
+
+const DOC_HASH_HEADER = 'X-PrettyFish-Doc-Hash'
 const LOCAL_RUN_DIR = path.resolve(process.cwd(), '.local-run')
 const LAYOUT_JSON = path.join(LOCAL_RUN_DIR, 'diagram-layout.json')
 const LAYOUT_JSONL = path.join(LOCAL_RUN_DIR, 'diagram-layout.jsonl')
@@ -45,6 +59,22 @@ export function watchProjectFilePlugin(): Plugin {
       const clients = new Map<number, WatchClient>()
       let nextClientId = 1
       let session: WatchSession | null = null
+      // One entry per tab. Several tabs can be connected and an old one can
+      // keep posting, so tabs are never merged: each reports its own document
+      // hash and its own render state, and the answer is chosen by hash.
+      const measures = new Map<string, { snapshot: MeasureSnapshot; receivedAt: number }>()
+      const MAX_REMEMBERED_TABS = 16
+
+      const rememberMeasure = (snapshot: MeasureSnapshot) => {
+        const tabId = typeof snapshot.tabId === 'string' ? snapshot.tabId : 'unknown-tab'
+        measures.delete(tabId)
+        measures.set(tabId, { snapshot, receivedAt: Date.now() })
+        while (measures.size > MAX_REMEMBERED_TABS) {
+          const oldest = measures.keys().next().value
+          if (oldest === undefined) break
+          measures.delete(oldest)
+        }
+      }
 
       const broadcast = (event: string, data: unknown) => {
         const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
@@ -186,7 +216,8 @@ export function watchProjectFilePlugin(): Plugin {
         req.on('end', () => {
           try {
             const body = Buffer.concat(chunks).toString('utf8')
-            const snapshot = JSON.parse(body || '{}') as Record<string, unknown>
+            const snapshot = JSON.parse(body || '{}') as MeasureSnapshot
+            rememberMeasure(snapshot)
             fs.mkdirSync(LOCAL_RUN_DIR, { recursive: true })
             const enriched: Record<string, unknown> = {
               ...snapshot,
@@ -245,6 +276,9 @@ export function watchProjectFilePlugin(): Plugin {
           JSON.parse(raw)
           res.setHeader('Content-Type', 'application/json')
           res.setHeader('Cache-Control', 'no-store')
+          // The app echoes this back in its measurements, so the tool can tell a
+          // stale tab from a current one.
+          res.setHeader(DOC_HASH_HEADER, createHash('sha256').update(raw).digest('hex'))
           res.end(raw)
         } catch (error) {
           res.statusCode = 400
@@ -255,6 +289,91 @@ export function watchProjectFilePlugin(): Plugin {
             }),
           )
         }
+      })
+
+      /**
+       * The measurement contract for tools: ask what the open tab currently
+       * knows about the file on disk. 200 with a phase; never guesses.
+       */
+      server.middlewares.use('/__prettyfish/watch/state', (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const requestedHash = url.searchParams.get('hash')
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+
+        if (!session) {
+          res.end(JSON.stringify({ phase: 'no-tab', reason: 'no watched file', watchingTabs: 0 }))
+          return
+        }
+
+        const raw = fs.readFileSync(session.absPath, 'utf8')
+        const docHash = createHash('sha256').update(raw).digest('hex')
+        const tabs = [...measures.entries()]
+          .map(([tabId, entry]) => ({
+            tabId,
+            docHash: typeof entry.snapshot.docHash === 'string' ? entry.snapshot.docHash : null,
+            readyDiagrams: Number(entry.snapshot.readyDiagrams ?? 0),
+            totalDiagrams: Number(entry.snapshot.totalDiagrams ?? 0),
+            overlapCount: Number(entry.snapshot.overlapCount ?? 0),
+            current: entry.snapshot.docHash === docHash,
+            receivedAt: entry.receivedAt,
+          }))
+          .sort((a, b) => b.receivedAt - a.receivedAt)
+        const matched = tabs.find((tab) => tab.current)
+          ? { snapshot: measures.get(tabs.find((tab) => tab.current)!.tabId)!.snapshot,
+              receivedAt: tabs.find((tab) => tab.current)!.receivedAt }
+          : null
+        const snapshot = matched?.snapshot ?? null
+        const staleTabs = tabs.filter((tab) => !tab.current).length
+        const watchingTabs = clients.size
+        const measuredHash = snapshot ? docHash : null
+        const readyDiagrams = Number(snapshot?.readyDiagrams ?? 0)
+        const totalDiagrams = Number(snapshot?.totalDiagrams ?? 0)
+        const failed = (snapshot?.pages ?? []).flatMap((page) =>
+          (page.diagrams ?? [])
+            .filter((diagram) => diagram.renderStatus === 'error')
+            .map(() => true),
+        )
+
+        let phase: WatchMeasurePhase = 'ready'
+        let reason = ''
+        if (watchingTabs === 0) {
+          phase = 'no-tab'
+          reason = 'no browser tab is connected to the watch server'
+        } else if (!snapshot && measures.size === 0) {
+          phase = 'rendering'
+          reason = 'the connected tab has not reported measurements yet'
+        } else if (!snapshot) {
+          phase = 'stale-app'
+          reason =
+            staleTabs > 0
+              ? `${staleTabs} tab(s) show another version of the file; none has this one. Reload the tab.`
+              : 'no connected tab has applied this version of the file yet'
+        } else if (totalDiagrams === 0 || readyDiagrams !== totalDiagrams) {
+          phase = 'rendering'
+          reason = `rendered ${readyDiagrams}/${totalDiagrams} diagrams`
+        } else if (failed.length > 0) {
+          phase = 'error'
+          reason = `${failed.length} diagram(s) failed to render`
+        }
+
+        res.end(
+          JSON.stringify({
+            phase,
+            reason,
+            docHash,
+            requestedHash,
+            appliedHash: measuredHash,
+            watchingTabs,
+            readyDiagrams,
+            totalDiagrams,
+            receivedAt: matched?.receivedAt ?? null,
+            documentsReporting: new Set(tabs.map((tab) => tab.docHash)).size,
+            tabs,
+            pages: snapshot?.pages ?? [],
+            overlapCount: snapshot?.overlapCount ?? 0,
+          }),
+        )
       })
 
       server.middlewares.use('/__prettyfish/watch/events', (req, res) => {
