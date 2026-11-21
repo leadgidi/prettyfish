@@ -10,10 +10,7 @@ description: >-
 
 # Pretty Fish tooling
 
-This skill is the manual for the tool. It knows nothing about how a particular
-team structures its documentation — for that, use the repo's own docs skill.
-
-Everything is one CLI:
+One CLI:
 
 ```bash
 PF="${PRETTYFISH_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/leadgidi/prettyfish}/pf"
