@@ -78,14 +78,9 @@ function findOverlaps(
 function measureDiagram(diagram: Diagram): LayoutDiagramMeasurement {
   const svgWidth = diagram.render?.svgWidth ?? null
   const svgHeight = diagram.render?.svgHeight ?? null
-  let domHeight: number | null = null
-  if (typeof document !== 'undefined') {
-    const el = document.querySelector(
-      `[data-diagram-id="${CSS.escape(diagram.id)}"]`,
-    ) as HTMLElement | null
-    if (el?.offsetHeight) domHeight = el.offsetHeight
-  }
-  const cardHeight = cardHeightFor(diagram, domHeight)
+  // The canvas may still display the previous revision. Use this revision's
+  // rendered SVG dimensions and the shared card layout instead of that DOM.
+  const cardHeight = cardHeightFor(diagram)
   return {
     id: diagram.id,
     name: diagram.name,
@@ -95,7 +90,7 @@ function measureDiagram(diagram: Diagram): LayoutDiagramMeasurement {
     svgWidth,
     svgHeight,
     cardHeight,
-    domHeight,
+    domHeight: null,
     right: diagram.x + diagram.width,
     bottom: diagram.y + cardHeight,
     renderStatus: diagram.render?.status ?? null,

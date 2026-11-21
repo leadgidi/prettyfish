@@ -15,17 +15,15 @@ Set `DOC` to the absolute path of the `.prettyfish.json` file. Quote both paths 
 
 ## Create and show a map
 
-For a new map, send a draft to `"$PF" present "$DOC" --create` on stdin. Use a heredoc to avoid a separate draft file:
+For a new map, use the write tool to save a draft JSON file in a temporary directory. Do not save it at `DOC`. Use this shape:
 
-```bash
-"$PF" present "$DOC" --create <<'JSON'
+```json
 {"pages":[{"name":"Overview","diagrams":[{"name":"Request path","code":"flowchart LR\n  Request --> Response"}]}]}
-JSON
 ```
 
-Put pages and cards in reading order. Add a `description` to a card when it needs context. Supply names and Mermaid code; omit IDs, selections, and positions. `--create` refuses to overwrite an existing map.
+Put pages and cards in reading order. Add a `description` when a card needs context. Omit IDs, selections, and positions.
 
-For an existing map, run `"$PF" present "$DOC"` after editing. Both forms validate the file, open the browser, pack the cards in the open tab, and check for overlaps and oversized cards. Leave the tab open. Report the map path and the check result.
+Run `"$PF" present "$DOC" --draft "$DRAFT"` with the draft's path. If validation fails, fix the draft and retry the same command. Use `"$PF" present "$DOC"` after editing an existing map. Both forms reuse the viewer when it is open, pack the cards, and check for overlaps and oversized cards. Report the map path and check result.
 
 ## Edit an existing file
 
@@ -42,7 +40,7 @@ Use `--new-page` instead of `--page` to append to a new page. Put cards in readi
 
 ## Fix a failed check
 
-Fix validation errors in the file before opening it. Split cards taller than 1400 px. If the tab is already open, run `"$PF" validate "$DOC" && "$PF" tidy "$DOC" && "$PF" check "$DOC"` without opening another tab.
+Fix the reported Mermaid lines. In sequence diagrams, use commas instead of semicolons in message and note text. Split cards taller than 1400 px. Run `present` again without opening another tab.
 
 Run `"$PF" state` when measurements are missing:
 

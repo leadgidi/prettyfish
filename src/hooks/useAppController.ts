@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useReducer, useRef } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import {
   createPage,
@@ -108,7 +108,7 @@ export interface AppController {
 }
 
 export function useAppController(isMobile: boolean): AppController {
-  const [state, dispatch] = useReducer(
+  const [candidate, dispatch] = useReducer(
     appStoreReducer,
     undefined,
     () => createStoreState(getInitialDocumentState(), {
@@ -119,6 +119,30 @@ export function useAppController(isMobile: boolean): AppController {
       sidebarWidth: getInitialSidebarWidth(),
     }),
   )
+
+  const watching = document.querySelector('meta[name="prettyfish-watch"]') !== null
+  usePersistenceSync({ state: candidate, dispatch, enabled: !watching })
+  const watchError = useWatchedProjectFile(watching, dispatch)
+  const candidatePage = candidate.pages.find(page => page.id === candidate.activePageId)
+  useRenderQueue({
+    pages: candidate.pages,
+    activePageId: candidate.activePageId,
+    activeDiagramId: candidatePage?.activeDiagramId ?? null,
+    dispatch,
+  })
+  const layout = useLayoutTelemetry(candidate.pages, candidate.activePageId, candidate.watchedRevision)
+  const layoutReady = layout !== null && layout.readyDiagrams === layout.totalDiagrams && layout.overlapCount === 0
+  const [published, setPublished] = useState<AppStoreState | null>(null)
+  useLayoutEffect(() => {
+    if (layoutReady) setPublished(candidate)
+  }, [candidate, layoutReady])
+
+  const failed = layout?.pages.flatMap(page => page.diagrams)
+    .find(diagram => diagram.renderStatus === 'error')
+  const watchScreen = watching && !published && !layoutReady
+    ? watchError ?? (failed ? `Could not render ${failed.name}.` : 'Preparing layout…')
+    : null
+  const state = watching && !layoutReady && published ? { ...published, ui: candidate.ui } : candidate
 
   // ── Refs for imperative canvas/editor callbacks ──────────────────────────────
   const focusDiagramRef = useRef<((id: string) => void) | null>(null)
@@ -200,23 +224,6 @@ export function useAppController(isMobile: boolean): AppController {
     restoreSnapshot,
     getInitialDocumentState,
   })
-
-  const watching = document.querySelector('meta[name="prettyfish-watch"]') !== null
-  usePersistenceSync({ state, dispatch, enabled: !watching })
-  const watchError = useWatchedProjectFile(watching, dispatch)
-  useRenderQueue({
-    pages: state.pages,
-    activePageId: state.activePageId,
-    activeDiagramId: activeDiagram?.id ?? null,
-    dispatch,
-  })
-  const layout = useLayoutTelemetry(state.pages, state.activePageId, state.watchedRevision)
-  const failed = layout?.pages.flatMap(page => page.diagrams)
-    .find(diagram => diagram.renderStatus === 'error')
-  const layoutReady = layout !== null && layout.readyDiagrams === layout.totalDiagrams && layout.overlapCount === 0
-  const watchScreen = watching
-    ? watchError ?? (failed ? `Could not render ${failed.name}.` : layoutReady ? null : 'Preparing layout…')
-    : null
 
   return {
     watchScreen,

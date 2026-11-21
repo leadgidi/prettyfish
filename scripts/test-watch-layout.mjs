@@ -62,7 +62,8 @@ try {
   await tab.getByText('Preparing layout…').waitFor({ state: 'visible', ...options })
   const draft = await waitForState(s => s.phase === 'ready' && s.totalDiagrams === 2 && s.watchingTabs === 2)
   assert.equal(draft.overlapCount, 1)
-  for (const page of [previous, tab]) assert.equal(await page.getByTestId('app-root').isVisible(), false)
+  assert.equal(await previous.getByTestId('app-root').isVisible(), true)
+  assert.equal(await tab.getByTestId('app-root').isVisible(), false)
 
   const wrongLayout = await fetch(`${base}/__prettyfish/watch/layout`, {
     method: 'POST',
@@ -82,7 +83,26 @@ try {
   assert.equal(context.pages().length, 2)
   const { stdout } = await exec('node', [...args, '--check'], options)
   assert.match(stdout, /layout:check clean - 2 diagrams, no overlaps/)
-  console.log('The same tabs applied the packed revision; no draft canvas or overlaps.')
+  await tab.evaluate(() => {
+    document.body.dataset.preparingAgain = 'false'
+    new MutationObserver(() => {
+      if (document.querySelector('[role="status"]')?.textContent?.includes('Preparing layout')) {
+        document.body.dataset.preparingAgain = 'true'
+      }
+    }).observe(document.body, { childList: true, subtree: true })
+  })
+  const revised = project('new', [0, 0])
+  revised.pages[0].diagrams[0].name = 'Updated card'
+  await writeFile(newFile, JSON.stringify(revised))
+  const revisedDraft = await waitForState(s => s.phase === 'ready' && s.overlapCount === 1)
+  assert.equal(await tab.getByTestId('app-root').isVisible(), true)
+  await exec('bash', ['scripts/pf', 'present', newFile], {
+    ...options, env: { ...process.env, PRETTYFISH_WATCH_BASE: base },
+  })
+  await waitForState(s => s.phase === 'ready' && s.overlapCount === 0 && s.docHash !== revisedDraft.docHash)
+  assert.equal(await tab.locator('body').getAttribute('data-preparing-again'), 'false')
+  assert.equal((await state()).watchingTabs, 2)
+  console.log('The same tabs applied both packed revisions without hiding the last clean map.')
 } finally {
   await browser?.close()
   await server?.close()

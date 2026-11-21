@@ -1,7 +1,6 @@
 """Create a map from ordered pages and Mermaid diagrams."""
 import argparse
 import json
-import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,9 +54,10 @@ def build_project(draft):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('doc', type=Path)
+    parser.add_argument('draft', type=Path)
     args = parser.parse_args()
     try:
-        project = build_project(json.load(sys.stdin))
+        project = build_project(json.loads(args.draft.read_text(encoding='utf-8')))
         with args.doc.open('x', encoding='utf-8') as output:
             output.write(json.dumps(project, indent=2, ensure_ascii=False) + '\n')
     except (ValueError, OSError) as error:

@@ -294,7 +294,14 @@ for (const failure of mermaidResult.failures) {
   console.error(
     `  mermaid  [${failure.pageName}] "${failure.diagramName}" (pages[${failure.pageIndex}].diagrams[${failure.diagramIndex}])`,
   )
-  console.error(`           ${failure.message.split('\n')[0]}`)
+  for (const line of failure.message.split('\n').slice(0, 8)) console.error(`           ${line}`)
+  const lineNumber = Number(failure.message.match(/on line (\d+)/)?.[1])
+  if (lineNumber > 0) {
+    const lines = failure.code.split('\n')
+    for (let i = Math.max(0, lineNumber - 2); i < Math.min(lines.length, lineNumber + 1); i++) {
+      console.error(`           ${i + 1}: ${lines[i]}`)
+    }
+  }
 }
 
 console.log('─'.repeat(60))
