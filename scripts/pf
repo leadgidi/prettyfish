@@ -12,14 +12,15 @@
 #   pf tidy <doc.prettyfish.json> [--cols N] [--gap-x N] [--gap-y N] [--dry-run]
 #   pf check <doc.prettyfish.json> [--max-card-height N]
 #   pf validate <doc.prettyfish.json>
+#   pf present <doc.prettyfish.json> [--create < draft.json]
+#   pf docs create <doc.prettyfish.json> < draft.json
 #   pf docs list <doc>
 #   pf docs set <doc> --page NAME --diagram NAME [--name N] [--description D] [--code-file F]
 #   pf docs append <doc> (--page NAME | --new-page NAME) --name N [--description D] [--code-file F]
 #   pf docs replace-page <doc> --page NAME --payload-file F
 #   pf root            print the install directory
 #   pf skill-path      print the installed skill file
-#
-# Paths are always explicit; this CLI knows nothing about any repository.
+# END HELP
 set -euo pipefail
 
 # Resolve this file through symlinks: the stable entry point $PRETTYFISH_HOME/pf
@@ -51,7 +52,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR == 1 {next} /^# END HELP$/ {exit} {sub(/^# ?/, ""); print}' "$SELF"
   exit "${1:-1}"
 }
 
@@ -207,7 +208,7 @@ cmd_watch() {
 }
 
 watch_start() {
-  local doc="" host="$DEFAULT_HOST" port="$DEFAULT_PORT"
+  local doc="" host="$DEFAULT_HOST" port="$DEFAULT_PORT" live
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --host) host="${2:?}"; shift 2 ;;
@@ -350,11 +351,31 @@ cmd_validate() {
   mjs scripts/validate-project.mjs "$doc" "$@"
 }
 
+cmd_present() {
+  local doc="${1:?doc path required}"; shift
+  if [[ "${1:-}" == '--create' ]]; then
+    shift
+    [[ $# -eq 0 ]] || usage
+    cmd_docs create "$doc"
+  fi
+  [[ $# -eq 0 ]] || usage
+  cmd_validate "$doc"
+  local started base
+  started="$(watch_start "$doc")"
+  printf '%s\n' "$started"
+  base="${started##*$'\nURL: '}"
+  [[ "$base" == http://* && "$base" != *$'\n'* ]] || die 'Watch server did not report its URL.'
+  cmd_open --base "$base"
+  cmd_tidy "$doc" --base "$base"
+  cmd_check "$doc" --base "$base"
+}
+
 # ── docs helpers ─────────────────────────────────────────────────────────────
 cmd_docs() {
   local sub="${1:-}"; shift || true
   local script
   case "$sub" in
+    create) python3 "$ROOT/scripts/docs/create-project.py" "$@"; return ;;
     list) script="list-diagrams.py" ;;
     set) script="set-diagram.py" ;;
     append) script="append-diagram.py" ;;
@@ -368,6 +389,9 @@ cmd_docs() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 cmd="${1:-}"; shift || true
+case "${1:-}:${2:-}" in
+  -h:*|--help:*|*:-h|*:--help) usage 0 ;;
+esac
 case "$cmd" in
   install) cmd_install "$@" ;;
   watch) cmd_watch "$@" ;;
@@ -376,6 +400,7 @@ case "$cmd" in
   tidy) cmd_tidy "$@" ;;
   check) cmd_check "$@" ;;
   validate) cmd_validate "$@" ;;
+  present) cmd_present "$@" ;;
   docs) cmd_docs "$@" ;;
   root) echo "$ROOT" ;;
   skill-path) echo "$ROOT/skills/$SKILL_NAME/SKILL.md" ;;

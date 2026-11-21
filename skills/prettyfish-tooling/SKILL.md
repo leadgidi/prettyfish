@@ -13,7 +13,21 @@ PF="${PRETTYFISH_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/leadgidi/prettyfish}/pf"
 
 Set `DOC` to the absolute path of the `.prettyfish.json` file. Quote both paths in commands.
 
-## Edit the file
+## Create and show a map
+
+For a new map, send a draft to `"$PF" present "$DOC" --create` on stdin. Use a heredoc to avoid a separate draft file:
+
+```bash
+"$PF" present "$DOC" --create <<'JSON'
+{"pages":[{"name":"Overview","diagrams":[{"name":"Request path","code":"flowchart LR\n  Request --> Response"}]}]}
+JSON
+```
+
+Put pages and cards in reading order. Add a `description` to a card when it needs context. Supply names and Mermaid code; omit IDs, selections, and positions. `--create` refuses to overwrite an existing map.
+
+For an existing map, run `"$PF" present "$DOC"` after editing. Both forms validate the file, open the browser, pack the cards in the open tab, and check for overlaps and oversized cards. Leave the tab open. Report the map path and the check result.
+
+## Edit an existing file
 
 Write changes to the JSON. Changes made in the browser do not save to disk. Use these commands as needed:
 
@@ -26,14 +40,11 @@ Write changes to the JSON. Changes made in the browser do not save to disk. Use 
 
 Use `--new-page` instead of `--page` to append to a new page. Put cards in reading order in `pages[].diagrams`. Do not set `x` or `y` by hand.
 
-## Validate and pack
+## Fix a failed check
 
-1. Run `"$PF" validate "$DOC"`. Fix document shape and Mermaid errors before packing. Validation does not need a browser.
-2. Run `"$PF" watch start "$DOC"`. Keep its browser tab open. Run `"$PF" open` if needed. The tab shows “Preparing layout…” while the map has overlaps.
-3. Run `"$PF" tidy "$DOC"`. Let it wait for measurements, write positions, and verify them in the same tab. Add `--dry-run` to preview moves without writing. Pass the server URL as `--base` if more than one server is running.
-4. Run `"$PF" check "$DOC"` to check for overlaps and cards taller than 1400 px without changing the file. Split oversized cards and repeat the checks.
+Fix validation errors in the file before opening it. Split cards taller than 1400 px. If the tab is already open, run `"$PF" validate "$DOC" && "$PF" tidy "$DOC" && "$PF" check "$DOC"` without opening another tab.
 
-## Fix missing measurements
+Run `"$PF" state` when measurements are missing:
 
 - `no-tab`: Open the watched map and leave the tab open.
 - `rendering`: Wait and check state again.
