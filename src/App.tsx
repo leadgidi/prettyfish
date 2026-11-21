@@ -329,8 +329,10 @@ export default function App() {
     updateCode(value)
   }, [activeDiagram?.code, isMobile, sidebarOpen, updateCode])
 
-  return (
-    <div data-testid="app-root" className="w-screen h-screen relative bg-background text-foreground overflow-hidden">
+  const workspace = (
+    <div data-testid="app-root" className="w-screen h-screen relative bg-background text-foreground overflow-hidden"
+      inert={controller.watchScreen !== null}
+      style={{ visibility: controller.watchScreen === null ? undefined : 'hidden' }}>
       <main aria-label="Diagram workspace" className="absolute inset-0">
         <Suspense fallback={<div className="h-full w-full bg-background" />}>
           <InfiniteCanvas
@@ -605,6 +607,17 @@ export default function App() {
 
       <KeyboardHelp open={helpOpen} onOpenChange={(open) => dispatch({ type: 'ui/set-help-open', open })} />
     </div>
+  )
+
+  return (
+    <>
+      {workspace}
+      {controller.watchScreen !== null && (
+        <div role="status" className="fixed inset-0 grid place-items-center bg-background text-foreground">
+          {controller.watchScreen}
+        </div>
+      )}
+    </>
   )
 }
 

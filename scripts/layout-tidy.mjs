@@ -117,8 +117,8 @@ function parseArgs(argv) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function hashFile(file) {
-  return createHash('sha256').update(await fs.readFile(file)).digest('hex')
+function hashProject(raw) {
+  return createHash('sha256').update(raw).digest('hex')
 }
 
 async function getJson(url) {
@@ -152,7 +152,7 @@ async function resolveBase(options, docPath) {
   }
   throw new Error(
     `No prettyfish watch server is serving this file.\n  tried:\n  ${seen.join('\n  ') || '(none)'}\n` +
-      `Start one: .agents/skills/prettyfish-docs/scripts/watch-start.sh ${docPath}`,
+      `Start one with pf watch start, then open the map.`,
   )
 }
 
@@ -164,11 +164,13 @@ function phaseRemedy(phase, base) {
 }
 
 /** Wait until the app reports measurements for exactly this document content. */
-async function waitForMeasurement(base, docHash, timeoutMs, verbose) {
+async function waitForMeasurement(base, docHash, timeoutMs, verbose, tabId) {
+  const query = new URLSearchParams({ hash: docHash })
+  if (tabId) query.set('tab', tabId)
   const deadline = Date.now() + timeoutMs
   let last = null
   while (Date.now() < deadline) {
-    const state = await getJson(`${base}/__prettyfish/watch/state?hash=${docHash}`)
+    const state = await getJson(`${base}/__prettyfish/watch/state?${query}`)
     last = state
     if (verbose && state) console.error(`[layout-tidy] phase=${state.phase} ${state.reason ?? ''}`)
     if (state?.phase === 'ready' && state.docHash === docHash) return state
@@ -178,7 +180,7 @@ async function waitForMeasurement(base, docHash, timeoutMs, verbose) {
           .filter((diagram) => diagram.renderStatus === 'error')
           .map((diagram) => `${page.pageName} / ${diagram.name}`),
       )
-      throw new Error(`Diagrams failed to render:\n  ${failed.join('\n  ')}`)
+      throw new Error(failed.length ? `Diagrams failed to render:\n  ${failed.join('\n  ')}` : state.reason)
     }
     await sleep(POLL_MS)
   }
@@ -285,9 +287,11 @@ const options = parseArgs(process.argv.slice(2))
 const docPath = path.resolve(process.cwd(), options.file)
 
 try {
-  const project = JSON.parse(await fs.readFile(docPath, 'utf8'))
+  const raw = await fs.readFile(docPath, 'utf8')
+  const project = JSON.parse(raw)
+  const revision = hashProject(raw)
   const base = await resolveBase(options, docPath)
-  const state = await waitForMeasurement(base, await hashFile(docPath), options.timeout, options.verbose)
+  const state = await waitForMeasurement(base, revision, options.timeout, options.verbose)
 
   if (options.check) {
     const { problems, oversize } = report(project, state, options)
@@ -309,9 +313,18 @@ try {
     } else if (options.dryRun) {
       console.log(`\ndry run: ${updates.length} position change(s) not written`)
     } else {
-      await fs.writeFile(docPath, `${JSON.stringify(project, null, 2)}\n`)
-      // The app reloads on save; the final verdict comes from the renderer.
-      const after = await waitForMeasurement(base, await hashFile(docPath), options.timeout, options.verbose)
+      const packed = `${JSON.stringify(project, null, 2)}\n`
+      const temp = await fs.mkdtemp(path.join(path.dirname(docPath), '.prettyfish-'))
+      try {
+        const staged = path.join(temp, 'project.json')
+        await fs.writeFile(staged, packed, { mode: (await fs.stat(docPath)).mode })
+        if (await fs.readFile(docPath, 'utf8') !== raw) throw new Error('The map changed during packing. Run tidy again.')
+        await fs.rename(staged, docPath)
+      } finally {
+        await fs.rm(temp, { recursive: true, force: true })
+      }
+      console.log('Wrote positions. Waiting for the measuring tab to apply them.')
+      const after = await waitForMeasurement(base, hashProject(packed), options.timeout, options.verbose, state.tabId)
       const verification = report(project, after, options)
       if (verification.problems.length > 0) {
         for (const line of verification.problems) console.error(line)

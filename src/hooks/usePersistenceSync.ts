@@ -15,9 +15,10 @@ import { type AppAction, type AppStoreState } from '../state/appStore'
 export interface UsePersistenceSyncOptions {
   state: AppStoreState
   dispatch: Dispatch<AppAction>
+  enabled: boolean
 }
 
-export function usePersistenceSync({ state, dispatch }: UsePersistenceSyncOptions): void {
+export function usePersistenceSync({ state, dispatch, enabled }: UsePersistenceSyncOptions): void {
   const hydratedRef = useRef(false)
   const suppressNextPersistRef = useRef(false)
   const lastSnapshotKeyRef = useRef<string | null>(null)
@@ -32,6 +33,7 @@ export function usePersistenceSync({ state, dispatch }: UsePersistenceSyncOption
   const snapshotKey = useMemo(() => JSON.stringify(snapshot), [snapshot])
 
   useEffect(() => {
+    if (!enabled) return
     let cancelled = false
 
     void loadPersistedDocumentState().then((persisted) => {
@@ -59,9 +61,10 @@ export function usePersistenceSync({ state, dispatch }: UsePersistenceSyncOption
     return () => {
       cancelled = true
     }
-  }, [dispatch])
+  }, [dispatch, enabled])
 
   useEffect(() => {
+    if (!enabled) return
     return subscribeToPersistedDocumentState((persisted) => {
       const normalized = normalizePersistedDocumentState(persisted)
       if (!normalized) return
@@ -77,10 +80,10 @@ export function usePersistenceSync({ state, dispatch }: UsePersistenceSyncOption
         },
       })
     })
-  }, [dispatch])
+  }, [dispatch, enabled])
 
   useEffect(() => {
-    if (!hydratedRef.current) return
+    if (!enabled || !hydratedRef.current) return
     if (suppressNextPersistRef.current) {
       suppressNextPersistRef.current = false
       return
@@ -89,5 +92,5 @@ export function usePersistenceSync({ state, dispatch }: UsePersistenceSyncOption
     lastSnapshotKeyRef.current = snapshotKey
     void savePersistedDocumentState(snapshot)
     publishPersistedDocumentState(snapshot)
-  }, [snapshot, snapshotKey])
+  }, [enabled, snapshot, snapshotKey])
 }

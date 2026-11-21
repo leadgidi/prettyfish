@@ -22,8 +22,26 @@ type MeasureSnapshot = {
   docHash?: string
   readyDiagrams?: number
   totalDiagrams?: number
-  pages?: Array<{ diagrams?: Array<{ renderStatus?: string | null }> }>
+  pages?: Array<{
+    pageId: string
+    diagrams: Array<{ id: string; x: number; y: number; width: number; renderStatus?: string | null }>
+  }>
   [key: string]: unknown
+}
+
+export function matchesProject(measurements: unknown, pages: unknown): boolean {
+  if (!Array.isArray(measurements) || !Array.isArray(pages) || measurements.length !== pages.length) return false
+  return pages.every((page, index) => {
+    const measured = measurements[index]
+    if (measured?.pageId !== page?.id || !Array.isArray(measured?.diagrams) ||
+        !Array.isArray(page?.diagrams) || measured.diagrams.length !== page.diagrams.length) return false
+    for (const [cardIndex, diagram] of page.diagrams.entries()) {
+      const card = measured.diagrams[cardIndex]
+      if (typeof diagram?.id !== 'string' || card?.id !== diagram.id ||
+          card.x !== diagram.x || card.y !== diagram.y || card.width !== diagram.width) return false
+    }
+    return typeof page?.id === 'string'
+  })
 }
 
 const DOC_HASH_HEADER = 'X-PrettyFish-Doc-Hash'
@@ -47,6 +65,10 @@ export function watchProjectFilePlugin(): Plugin {
 
   return {
     name: 'prettyfish-watch-project',
+    apply: 'serve',
+    transformIndexHtml() {
+      if (initial) return [{ tag: 'meta', attrs: { name: 'prettyfish-watch' }, injectTo: 'head' }]
+    },
     configureServer(server) {
       if (!initial) {
         server.middlewares.use('/__prettyfish/watch/status', (_req, res) => {
@@ -260,7 +282,7 @@ export function watchProjectFilePlugin(): Plugin {
         })
       })
 
-      server.middlewares.use('/__prettyfish/watch/project', (_req, res) => {
+      server.middlewares.use('/__prettyfish/watch/project', (req, res) => {
         try {
           if (!session || !fs.existsSync(session.absPath)) {
             res.statusCode = 404
@@ -278,7 +300,15 @@ export function watchProjectFilePlugin(): Plugin {
           res.setHeader('Cache-Control', 'no-store')
           // The app echoes this back in its measurements, so the tool can tell a
           // stale tab from a current one.
-          res.setHeader(DOC_HASH_HEADER, createHash('sha256').update(raw).digest('hex'))
+          const revision = createHash('sha256').update(raw).digest('hex')
+          const etag = `"${revision}"`
+          res.setHeader(DOC_HASH_HEADER, revision)
+          res.setHeader('ETag', etag)
+          if (req.headers['if-none-match'] === etag) {
+            res.statusCode = 304
+            res.end()
+            return
+          }
           res.end(raw)
         } catch (error) {
           res.statusCode = 400
@@ -298,6 +328,7 @@ export function watchProjectFilePlugin(): Plugin {
       server.middlewares.use('/__prettyfish/watch/state', (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const requestedHash = url.searchParams.get('hash')
+        const requestedTab = url.searchParams.get('tab')
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')
 
@@ -306,8 +337,17 @@ export function watchProjectFilePlugin(): Plugin {
           return
         }
 
-        const raw = fs.readFileSync(session.absPath, 'utf8')
-        const docHash = createHash('sha256').update(raw).digest('hex')
+        let docHash: string
+        let pages: unknown
+        try {
+          const raw = fs.readFileSync(session.absPath, 'utf8')
+          docHash = createHash('sha256').update(raw).digest('hex')
+          pages = JSON.parse(raw)?.pages
+          if (!Array.isArray(pages)) throw new Error('Expected a pages array')
+        } catch (error) {
+          res.end(JSON.stringify({ phase: 'error', reason: String(error), pages: [] }))
+          return
+        }
         const tabs = [...measures.entries()]
           .map(([tabId, entry]) => ({
             tabId,
@@ -315,15 +355,12 @@ export function watchProjectFilePlugin(): Plugin {
             readyDiagrams: Number(entry.snapshot.readyDiagrams ?? 0),
             totalDiagrams: Number(entry.snapshot.totalDiagrams ?? 0),
             overlapCount: Number(entry.snapshot.overlapCount ?? 0),
-            current: entry.snapshot.docHash === docHash,
+            current: entry.snapshot.docHash === docHash && matchesProject(entry.snapshot.pages, pages),
             receivedAt: entry.receivedAt,
           }))
           .sort((a, b) => b.receivedAt - a.receivedAt)
-        const matched = tabs.find((tab) => tab.current)
-          ? { snapshot: measures.get(tabs.find((tab) => tab.current)!.tabId)!.snapshot,
-              receivedAt: tabs.find((tab) => tab.current)!.receivedAt }
-          : null
-        const snapshot = matched?.snapshot ?? null
+        const matched = tabs.find(tab => tab.current && (!requestedTab || tab.tabId === requestedTab))
+        const snapshot = matched ? measures.get(matched.tabId)?.snapshot ?? null : null
         const staleTabs = tabs.filter((tab) => !tab.current).length
         const watchingTabs = clients.size
         const measuredHash = snapshot ? docHash : null
@@ -349,12 +386,12 @@ export function watchProjectFilePlugin(): Plugin {
             staleTabs > 0
               ? `${staleTabs} tab(s) show another version of the file; none has this one. Reload the tab.`
               : 'no connected tab has applied this version of the file yet'
-        } else if (totalDiagrams === 0 || readyDiagrams !== totalDiagrams) {
-          phase = 'rendering'
-          reason = `rendered ${readyDiagrams}/${totalDiagrams} diagrams`
         } else if (failed.length > 0) {
           phase = 'error'
           reason = `${failed.length} diagram(s) failed to render`
+        } else if (readyDiagrams !== totalDiagrams) {
+          phase = 'rendering'
+          reason = `rendered ${readyDiagrams}/${totalDiagrams} diagrams`
         }
 
         res.end(
@@ -368,6 +405,7 @@ export function watchProjectFilePlugin(): Plugin {
             readyDiagrams,
             totalDiagrams,
             receivedAt: matched?.receivedAt ?? null,
+            tabId: matched?.tabId ?? null,
             documentsReporting: new Set(tabs.map((tab) => tab.docHash)).size,
             tabs,
             pages: snapshot?.pages ?? [],

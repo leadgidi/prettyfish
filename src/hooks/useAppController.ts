@@ -54,6 +54,7 @@ function getInitialSidebarWidth(): number | null {
 }
 
 export interface AppController {
+  watchScreen: string | null
   state: AppStoreState
   activePage: DiagramPage
   activeDiagram: Diagram | null
@@ -200,18 +201,25 @@ export function useAppController(isMobile: boolean): AppController {
     getInitialDocumentState,
   })
 
-  // ── Side effects: persistence sync + render queue ───────────────────────────
-  usePersistenceSync({ state, dispatch })
-  useWatchedProjectFile(dispatch)
+  const watching = document.querySelector('meta[name="prettyfish-watch"]') !== null
+  usePersistenceSync({ state, dispatch, enabled: !watching })
+  const watchError = useWatchedProjectFile(watching, dispatch)
   useRenderQueue({
     pages: state.pages,
     activePageId: state.activePageId,
     activeDiagramId: activeDiagram?.id ?? null,
     dispatch,
   })
-  useLayoutTelemetry(state.pages, state.activePageId)
+  const layout = useLayoutTelemetry(state.pages, state.activePageId, state.watchedRevision)
+  const failed = layout?.pages.flatMap(page => page.diagrams)
+    .find(diagram => diagram.renderStatus === 'error')
+  const layoutReady = layout !== null && layout.readyDiagrams === layout.totalDiagrams && layout.overlapCount === 0
+  const watchScreen = watching
+    ? watchError ?? (failed ? `Could not render ${failed.name}.` : layoutReady ? null : 'Preparing layout…')
+    : null
 
   return {
+    watchScreen,
     state,
     activePage,
     activeDiagram,

@@ -3,9 +3,8 @@
  * Posts per-page diagram x/y/width/cardHeight after Mermaid render completes
  * so agents can detect overlaps from disk logs.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { cardHeightFor, findOverlappingBoxes } from '../lib/cardLayout'
-import { getWatchedDocHash } from '../lib/watchDocHash'
 import type { Diagram, DiagramPage } from '../types'
 
 const LAYOUT_ENDPOINT = '/__prettyfish/watch/layout'
@@ -103,7 +102,7 @@ function measureDiagram(diagram: Diagram): LayoutDiagramMeasurement {
   }
 }
 
-function buildSnapshot(pages: DiagramPage[], activePageId: string): LayoutSnapshot {
+function buildSnapshot(pages: DiagramPage[], activePageId: string, revision: string): LayoutSnapshot {
   let readyDiagrams = 0
   let totalDiagrams = 0
   const pageMeasurements: LayoutPageMeasurement[] = pages.map((page) => {
@@ -124,7 +123,7 @@ function buildSnapshot(pages: DiagramPage[], activePageId: string): LayoutSnapsh
   return {
     ts: new Date().toISOString(),
     tabId: TAB_ID,
-    docHash: getWatchedDocHash(),
+    docHash: revision,
     activePageId,
     pages: pageMeasurements,
     readyDiagrams,
@@ -136,25 +135,16 @@ function buildSnapshot(pages: DiagramPage[], activePageId: string): LayoutSnapsh
 /**
  * When watch mode is on, debounce-post layout snapshots after renders settle.
  */
-export function useLayoutTelemetry(pages: DiagramPage[], activePageId: string): void {
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastPayloadRef = useRef<string>('')
+export function useLayoutTelemetry(pages: DiagramPage[], activePageId: string, revision: string | null) {
+  const [measurement, setMeasurement] = useState<LayoutSnapshot | null>(null)
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    // Only in Vite watch / local app — endpoint 404s otherwise (ignored).
-    if (timerRef.current) clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => {
-      const snapshot = buildSnapshot(pages, activePageId)
-      // Publish for tooling even before the first POST succeeds.
+    if (revision === null) return
+    const timer = setTimeout(() => {
+      const snapshot = buildSnapshot(pages, activePageId, revision)
       window.__prettyfishLayoutSnapshot = snapshot
-      // Without a document identity the measurement cannot be matched to a
-      // file, so it is not a measurement yet.
-      if (!snapshot.docHash) return
-      if (snapshot.readyDiagrams === 0) return
+      setMeasurement(snapshot)
       const payload = JSON.stringify(snapshot)
-      if (payload === lastPayloadRef.current) return
-      lastPayloadRef.current = payload
 
       for (const page of snapshot.pages) {
         for (const d of page.diagrams) {
@@ -183,8 +173,8 @@ export function useLayoutTelemetry(pages: DiagramPage[], activePageId: string): 
       })
     }, DEBOUNCE_MS)
 
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [pages, activePageId])
+    return () => clearTimeout(timer)
+  }, [pages, activePageId, revision])
+
+  return measurement?.docHash === revision ? measurement : null
 }

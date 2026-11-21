@@ -34,10 +34,12 @@ export interface AppUiState {
 
 export interface AppStoreState extends UndoableDocumentState {
   ui: AppUiState
+  watchedRevision: string | null
 }
 
 export type AppAction =
   | { type: 'document/restore'; snapshot: UndoableDocumentState }
+  | { type: 'watch/apply'; snapshot: UndoableDocumentState; revision: string }
   | { type: 'document/set-mode'; mode: AppMode }
   | { type: 'document/set-editor-ligatures'; value: boolean }
   | { type: 'document/set-auto-format'; value: boolean }
@@ -66,7 +68,7 @@ export type AppAction =
   | { type: 'ui/set-sidebar-width'; width: number | null }
 
 export function createStoreState(document: UndoableDocumentState, ui: AppUiState): AppStoreState {
-  return { ...document, ui }
+  return { ...document, ui, watchedRevision: null }
 }
 
 export function stripDocumentSnapshot(state: AppStoreState): UndoableDocumentState {
@@ -167,7 +169,13 @@ export function pickNextQueuedDiagram(
 }
 
 export function appStoreReducer(state: AppStoreState, action: AppAction): AppStoreState {
+  if (state.watchedRevision && action.type !== 'watch/apply' && action.type !== 'page/select' &&
+      action.type !== 'diagram/select' && !action.type.startsWith('render/') && !action.type.startsWith('ui/')) {
+    return state
+  }
   switch (action.type) {
+    case 'watch/apply':
+      return { ...state, ...action.snapshot, watchedRevision: action.revision, ui: { ...state.ui, contextMenu: null } }
     case 'document/restore':
       return { ...state, ...action.snapshot, ui: { ...state.ui, contextMenu: null } }
     case 'document/set-mode':
