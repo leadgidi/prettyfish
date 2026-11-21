@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Dispatch } from 'react'
 
 import { normalizeAppState } from '../lib/documentState'
+import { watchTabId } from '../lib/watchTab'
 import { withRuntimePagesState } from '../types'
 import type { AppAction } from '../state/appStore'
 
@@ -11,12 +12,18 @@ export function useWatchedProjectFile(enabled: boolean, dispatch: Dispatch<AppAc
   useEffect(() => {
     if (!enabled) return
     const lifetime = new AbortController()
-    const source = new EventSource('/__prettyfish/watch/events')
+    const source = new EventSource(`/__prettyfish/watch/events?tab=${watchTabId}`)
     let etag: string | null = null
+    let connection = 0
+    source.onopen = () => {
+      connection++
+      etag = null
+    }
     let timer: ReturnType<typeof setTimeout>
 
     // Reconcile against disk even if the connection missed a change event.
     const reconcile = async () => {
+      const startedOn = connection
       try {
         const response = await fetch('/__prettyfish/watch/project', {
           headers: etag ? { 'If-None-Match': etag } : {},
@@ -34,7 +41,7 @@ export function useWatchedProjectFile(enabled: boolean, dispatch: Dispatch<AppAc
             revision,
             snapshot: { ...state, pages: withRuntimePagesState(state.pages) },
           })
-          etag = response.headers.get('ETag')
+          if (startedOn === connection) etag = response.headers.get('ETag')
         }
         if (!lifetime.signal.aborted) setError(null)
       } catch (cause) {

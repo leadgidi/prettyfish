@@ -21,7 +21,7 @@ For a new map, use the write tool to save a draft JSON file in a temporary direc
 {"pages":[{"name":"Overview","diagrams":[{"name":"Request path","code":"flowchart LR\n  Request --> Response"}]}]}
 ```
 
-Put pages and cards in reading order. Add a `description` when a card needs context. Omit IDs, selections, and positions.
+Put pages and cards in reading order. Add a `description` when a card needs context. Omit IDs, selections, and positions. Use commas instead of semicolons in sequence messages and notes. Quote flowchart labels that contain punctuation.
 
 Run `"$PF" present "$DOC" --draft "$DRAFT"` with the draft's path. If validation fails, fix the draft and retry the same command. Use `"$PF" present "$DOC"` after editing an existing map. Both forms reuse the viewer when it is open, pack the cards, and check for overlaps and oversized cards. Report the map path and check result.
 
@@ -40,7 +40,7 @@ Use `--new-page` instead of `--page` to append to a new page. Put cards in readi
 
 ## Fix a failed check
 
-Fix the reported Mermaid lines. In sequence diagrams, use commas instead of semicolons in message and note text. Split cards taller than 1400 px. Run `present` again without opening another tab.
+Fix the reported Mermaid lines in the draft, then retry the same command. If the map already exists, fix the map instead and run `present` without `--draft`. Split cards taller than 1400 px.
 
 Run `"$PF" state` when measurements are missing:
 

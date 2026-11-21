@@ -7,12 +7,9 @@ import { useEffect, useState } from 'react'
 import { cardHeightFor, findOverlappingBoxes } from '../lib/cardLayout'
 import type { Diagram, DiagramPage } from '../types'
 
+import { watchTabId } from '../lib/watchTab'
+
 const LAYOUT_ENDPOINT = '/__prettyfish/watch/layout'
-/** One id per page load: a reload is a new measurement source. */
-const TAB_ID =
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`
 const DEBOUNCE_MS = 350
 
 export type LayoutDiagramMeasurement = {
@@ -117,7 +114,7 @@ function buildSnapshot(pages: DiagramPage[], activePageId: string, revision: str
   })
   return {
     ts: new Date().toISOString(),
-    tabId: TAB_ID,
+    tabId: watchTabId,
     docHash: revision,
     activePageId,
     pages: pageMeasurements,

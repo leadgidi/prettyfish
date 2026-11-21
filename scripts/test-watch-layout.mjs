@@ -102,7 +102,28 @@ try {
   await waitForState(s => s.phase === 'ready' && s.overlapCount === 0 && s.docHash !== revisedDraft.docHash)
   assert.equal(await tab.locator('body').getAttribute('data-preparing-again'), 'false')
   assert.equal((await state()).watchingTabs, 2)
-  console.log('The same tabs applied both packed revisions without hiding the last clean map.')
+  const draftBytes = JSON.stringify(revised)
+  await writeFile(newFile, draftBytes)
+  const bothReady = await waitForState(s => s.overlapCount === 1 && s.tabs.filter(t => t.current && t.readyDiagrams === 2).length === 2)
+  const firstId = await previous.evaluate(() => window.__prettyfishLayoutSnapshot.tabId)
+  const disconnecting = bothReady.tabId === firstId ? previous : tab
+  const survivor = disconnecting === previous ? tab : previous
+  // Disconnect the selected measuring tab before it can report the packed file.
+  await disconnecting.route('**/__prettyfish/watch/project', async route => {
+    const response = await route.fetch()
+    if (response.status() === 200 && await response.text() !== draftBytes) {
+      await route.abort()
+      void disconnecting.close()
+      return
+    }
+    await route.fulfill({ response })
+  })
+  await exec('node', args, options)
+  const recovered = await waitForState(s => s.phase === 'ready' && s.watchingTabs === 1 && s.overlapCount === 0)
+  assert.equal(recovered.tabs.length, 1)
+  assert.notEqual(recovered.tabId, bothReady.tabId)
+  assert.equal(await survivor.getByTestId('app-root').isVisible(), true)
+  console.log('Verified the packed revision after the original measuring tab disconnected.')
 } finally {
   await browser?.close()
   await server?.close()

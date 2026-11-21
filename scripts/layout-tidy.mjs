@@ -164,9 +164,8 @@ function phaseRemedy(phase, base) {
 }
 
 /** Wait until the app reports measurements for exactly this document content. */
-async function waitForMeasurement(base, docHash, timeoutMs, verbose, tabId) {
+async function waitForMeasurement(base, docHash, timeoutMs, verbose) {
   const query = new URLSearchParams({ hash: docHash })
-  if (tabId) query.set('tab', tabId)
   const deadline = Date.now() + timeoutMs
   let last = null
   while (Date.now() < deadline) {
@@ -323,8 +322,8 @@ try {
       } finally {
         await fs.rm(temp, { recursive: true, force: true })
       }
-      console.log('Wrote positions. Waiting for the measuring tab to apply them.')
-      const after = await waitForMeasurement(base, hashProject(packed), options.timeout, options.verbose, state.tabId)
+      console.log('Wrote positions. Waiting for the viewer to apply them.')
+      const after = await waitForMeasurement(base, hashProject(packed), options.timeout, options.verbose)
       const verification = report(project, after, options)
       if (verification.problems.length > 0) {
         for (const line of verification.problems) console.error(line)

@@ -3,11 +3,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Plugin, ViteDevServer } from 'vite'
 
-type WatchClient = {
-  id: number
-  res: import('node:http').ServerResponse
-}
-
 type WatchSession = {
   absPath: string
   lastMtimeMs: number | null
@@ -78,8 +73,7 @@ export function watchProjectFilePlugin(): Plugin {
         return
       }
 
-      const clients = new Map<number, WatchClient>()
-      let nextClientId = 1
+      const clients = new Map<string, import('node:http').ServerResponse>()
       let session: WatchSession | null = null
       // One entry per tab. Several tabs can be connected and an old one can
       // keep posting, so tabs are never merged: each reports its own document
@@ -88,7 +82,8 @@ export function watchProjectFilePlugin(): Plugin {
       const MAX_REMEMBERED_TABS = 16
 
       const rememberMeasure = (snapshot: MeasureSnapshot) => {
-        const tabId = typeof snapshot.tabId === 'string' ? snapshot.tabId : 'unknown-tab'
+        const tabId = snapshot.tabId
+        if (!tabId || !clients.has(tabId)) return
         measures.delete(tabId)
         measures.set(tabId, { snapshot, receivedAt: Date.now() })
         while (measures.size > MAX_REMEMBERED_TABS) {
@@ -100,8 +95,8 @@ export function watchProjectFilePlugin(): Plugin {
 
       const broadcast = (event: string, data: unknown) => {
         const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-        for (const client of clients.values()) {
-          client.res.write(payload)
+        for (const res of clients.values()) {
+          res.write(payload)
         }
       }
 
@@ -328,7 +323,6 @@ export function watchProjectFilePlugin(): Plugin {
       server.middlewares.use('/__prettyfish/watch/state', (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const requestedHash = url.searchParams.get('hash')
-        const requestedTab = url.searchParams.get('tab')
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')
 
@@ -359,7 +353,8 @@ export function watchProjectFilePlugin(): Plugin {
             receivedAt: entry.receivedAt,
           }))
           .sort((a, b) => b.receivedAt - a.receivedAt)
-        const matched = tabs.find(tab => tab.current && (!requestedTab || tab.tabId === requestedTab))
+        const matched = tabs.find(tab => tab.current && tab.readyDiagrams === tab.totalDiagrams)
+          ?? tabs.find(tab => tab.current)
         const snapshot = matched ? measures.get(matched.tabId)?.snapshot ?? null : null
         const staleTabs = tabs.filter((tab) => !tab.current).length
         const watchingTabs = clients.size
@@ -415,6 +410,12 @@ export function watchProjectFilePlugin(): Plugin {
       })
 
       server.middlewares.use('/__prettyfish/watch/events', (req, res) => {
+        const tab = new URL(req.url ?? '/', 'http://localhost').searchParams.get('tab')
+        if (!tab) {
+          res.writeHead(400).end('Missing tab ID')
+          return
+        }
+        clients.get(tab)?.end()
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -427,10 +428,11 @@ export function watchProjectFilePlugin(): Plugin {
           })}\n\n`,
         )
 
-        const id = nextClientId++
-        clients.set(id, { id, res })
-        req.on('close', () => {
-          clients.delete(id)
+        clients.set(tab, res)
+        res.on('close', () => {
+          if (clients.get(tab) !== res) return
+          clients.delete(tab)
+          measures.delete(tab)
         })
       })
     },
