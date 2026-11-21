@@ -6,8 +6,6 @@
  * telemetry, the headless layout tooling — must derive it with the same formula.
  * When two of them disagree, cards overlap.
  */
-import type { Diagram } from '../types'
-
 /** Label header above the preview: name input plus description input. */
 export const LABEL_CHROME_PX = 72
 /** Smallest card the canvas ever draws (DiagramNode minHeight). */
@@ -23,6 +21,12 @@ export interface DiagramCard {
   id: string
   width: number
   height: number
+}
+
+/** The part of a diagram the geometry needs; avoids importing the app types. */
+export interface DiagramCardSource {
+  width: number
+  render?: { svgWidth: number | null; svgHeight: number | null } | null
 }
 
 export interface CardPosition {
@@ -79,7 +83,7 @@ export function estimateCardHeight(
  * Card height for a diagram. Prefer this over reading `render.svgHeight`, which
  * is the SVG's intrinsic height before the preview scales it down.
  */
-export function cardHeightFor(diagram: Diagram, domHeight: number | null = null): number {
+export function cardHeightFor(diagram: DiagramCardSource, domHeight: number | null = null): number {
   const estimated = estimateCardHeight(
     diagram.width,
     diagram.render?.svgWidth ?? null,

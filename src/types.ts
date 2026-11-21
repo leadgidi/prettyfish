@@ -1,3 +1,5 @@
+import { cardHeightFor } from './lib/cardLayout'
+
 export type AppMode = 'light' | 'dark'
 export type MermaidBuiltinTheme = 'default' | 'neutral' | 'dark' | 'forest' | 'base'
 export type MermaidTheme = MermaidBuiltinTheme | 'wireframe' | 'corporate' | 'amethyst' | 'neon' | 'blueprint' | 'newsprint' | 'dataviz' | 'evergreen' | 'rosepine' | 'bauhaus' | 'terracotta' | 'midnight' | 'ocean' | 'brutalist'
@@ -109,7 +111,6 @@ export const ARTBOARD_COLS = 3
 export const ARTBOARD_GAP_X = 80
 export const ARTBOARD_GAP_Y = 50
 export const ARTBOARD_DEFAULT_WIDTH = 640
-export const ARTBOARD_DEFAULT_HEIGHT = 480 // approximate, actual height is dynamic
 
 export function nextDiagramPosition(diagrams: Diagram[]): { x: number; y: number } {
   if (diagrams.length === 0) return { x: 0, y: 0 }
@@ -124,13 +125,13 @@ export function nextDiagramPosition(diagrams: Diagram[]): { x: number; y: number
     x += (diagrams[i]?.width ?? ARTBOARD_DEFAULT_WIDTH) + ARTBOARD_GAP_X
   }
 
-  // Y: sum approximate heights of all rows above this one
-  // Use the tallest diagram in each row as the row height
+  // Y: sum the real row heights. A card is label chrome plus the scaled
+  // preview, never the SVG's intrinsic height, or tall diagrams leave gaps and
+  // flat ones overlap the next row.
   let y = 0
   for (let r = 0; r < row; r++) {
     const rowDiagrams = diagrams.slice(r * ARTBOARD_COLS, (r + 1) * ARTBOARD_COLS)
-    const rowHeight = Math.max(...rowDiagrams.map(d => d.render?.svgHeight ?? ARTBOARD_DEFAULT_HEIGHT))
-    y += rowHeight + ARTBOARD_GAP_Y
+    y += Math.max(...rowDiagrams.map(d => cardHeightFor(d))) + ARTBOARD_GAP_Y
   }
 
   return { x, y }
