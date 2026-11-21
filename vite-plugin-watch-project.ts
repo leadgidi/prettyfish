@@ -188,7 +188,7 @@ export function watchProjectFilePlugin(): Plugin {
             const body = Buffer.concat(chunks).toString('utf8')
             const snapshot = JSON.parse(body || '{}') as Record<string, unknown>
             fs.mkdirSync(LOCAL_RUN_DIR, { recursive: true })
-            const enriched = {
+            const enriched: Record<string, unknown> = {
               ...snapshot,
               projectPath: session?.absPath ?? null,
               receivedAt: new Date().toISOString(),
