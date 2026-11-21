@@ -24,6 +24,8 @@
     "watch:set": "node scripts/watch-ctl.mjs set",
     "watch:layout": "node scripts/watch-ctl.mjs layout",
     "watch:validate": "node --experimental-strip-types scripts/validate-project.mjs --from-watch",
+    "layout:tidy": "node --experimental-strip-types scripts/layout-tidy.mjs",
+    "layout:check": "node --experimental-strip-types scripts/layout-tidy.mjs --check",
     "validate:project": "node --experimental-strip-types scripts/validate-project.mjs",
     "dev:worker": "wrangler dev --port 8787 --compatibility-date 2026-04-08",
     "build": "npm run seo:generate && vite build",

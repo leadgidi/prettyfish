@@ -54,6 +54,34 @@ With the browser open on the watched project, Mermaid render completion posts a 
 
 Each snapshot lists every page’s diagrams with `x`, `y`, `width`, `cardHeight`, SVG size, and any AABB overlaps. Agents/scripts read that file and re-pack the `.prettyfish.json` when overlaps are reported.
 
+## Pack pages so cards never overlap
+
+A diagram persists `x`/`y`/`width` only. Its height comes from the rendered
+Mermaid SVG, so a hand-written `y` cannot be checked and will eventually overlap.
+Do not guess: measure.
+
+```bash
+npm run layout:tidy -- /absolute/path/to/project.prettyfish.json
+npm run layout:check -- /absolute/path/to/project.prettyfish.json
+```
+
+- `layout:tidy` drives the real app in headless Chromium, reads the measured card
+  footprint from `window.__prettyfishLayoutSnapshot`, and re-packs every page
+  (default 2 columns, 100/120px gaps) using the same `packCards` code the canvas
+  uses. It rewrites `x`/`y` only, and is idempotent: a second run changes nothing.
+- `layout:check` writes nothing and exits 1 when any card overlaps or exceeds
+  `--max-card-height` (default 1400px). Use it as a gate.
+- Without `--base` the script reuses a watch server already watching that file,
+  otherwise it starts its own on `--port 5199` and stops it afterwards. A reused
+  server gets 10s to answer; if it serves a stale module graph the script starts
+  its own from current source.
+
+Flags: `--cols`, `--gap-x`, `--gap-y`, `--dry-run`, `--max-card-height`,
+`--base`, `--port`, `--timeout`, `--verbose`.
+
+Authoring rule: order in `pages[].diagrams` is the reading order (row-major), so
+append diagrams in narrative order and let the packer assign coordinates.
+
 ## Validate a project file
 
 Checks document shape (ids, active pointers, non-empty code) and runs `mermaid.parse()` on every diagram (jsdom-backed, so flowcharts work in Node).
