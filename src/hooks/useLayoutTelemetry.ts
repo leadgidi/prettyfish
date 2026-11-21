@@ -41,6 +41,16 @@ export type LayoutSnapshot = {
   overlapCount: number
 }
 
+declare global {
+  interface Window {
+    /**
+     * Latest measured layout, published for headless tooling
+     * (scripts/layout-tidy.mjs). Read-only: never write this yourself.
+     */
+    __prettyfishLayoutSnapshot?: LayoutSnapshot
+  }
+}
+
 function findOverlaps(
   diagrams: LayoutDiagramMeasurement[],
 ): Array<{ a: string; b: string }> {
@@ -124,6 +134,8 @@ export function useLayoutTelemetry(pages: DiagramPage[], activePageId: string): 
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
       const snapshot = buildSnapshot(pages, activePageId)
+      // Publish for headless tooling even before the first POST succeeds.
+      window.__prettyfishLayoutSnapshot = snapshot
       // Prefer logging once we have at least one ready diagram.
       if (snapshot.readyDiagrams === 0) return
       const payload = JSON.stringify(snapshot)
